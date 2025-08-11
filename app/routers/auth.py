@@ -122,3 +122,4 @@ async def get_current_user_info(
             status_code=500,
             detail="Error retrieving user information"
         )
+    
