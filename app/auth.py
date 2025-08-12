@@ -22,11 +22,21 @@ def get_password_hash(password: str) -> str:
     """Hash a password."""
     return pwd_context.hash(password)
 
-def authenticate_user(db: Session, email: str, password: str):
-    """Authenticate user with email and password."""
+def authenticate_user(db: Session, email: str, password: Optional[str] = None):
+    """Authenticate user with email and password or OAuth."""
     user = db.query(models.User).filter(models.User.email == email).first()
-    if not user or not verify_password(password, user.hashed_password):
+    
+    if not user:
         return False
+    
+    # For OAuth users (no password)
+    if user.hashed_password is None and password is None:
+        return user
+    
+    # For password-based users
+    if not user.hashed_password or not verify_password(password, user.hashed_password):
+        return False
+    
     return user
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -51,3 +61,22 @@ def verify_token(token: str):
         return email
     except JWTError:
         return None
+
+async def verify_google_token(token: str) -> dict:
+    """Verify Google ID token and return user info."""
+    from google.oauth2 import id_token
+    from google.auth.transport import requests
+    
+    try:
+        idinfo = id_token.verify_oauth2_token(
+            token, 
+            requests.Request(), 
+            os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+        )
+        
+        if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
+            raise ValueError("Wrong issuer.")
+            
+        return idinfo
+    except ValueError as e:
+        raise ValueError(f"Invalid Google authentication: {str(e)}")

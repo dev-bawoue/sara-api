@@ -8,9 +8,12 @@ class User(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
+    hashed_password = Column(String, nullable=True)  # Nullable for OAuth users
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    auth_provider = Column(String, default="email")  # 'email' or 'google'
+    full_name = Column(String, nullable=True)  # For OAuth users
+    avatar_url = Column(String, nullable=True)  # For OAuth users
     
     # Relationship with queries
     queries = relationship("QueryHistory", back_populates="user")
