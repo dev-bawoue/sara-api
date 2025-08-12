@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer
-from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from datetime import timedelta
+import logging
 from app.database import get_db
 from app import schemas, crud, auth, models
 from app.dependencies import get_client_ip, get_current_user
+
+# Add logger configuration
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["authentication"])
 security = HTTPBearer()
@@ -21,6 +24,7 @@ async def register(
         # Check if user already exists
         db_user = crud.get_user_by_email(db, email=user.email)
         if db_user:
+            logger.warning(f"Registration attempt with existing email: {user.email}")
             raise HTTPException(
                 status_code=400,
                 detail="Email already registered"
@@ -39,14 +43,16 @@ async def register(
             severity="INFO"
         )
         
-        # Convert to Pydantic model before returning
-        return schemas.User.from_orm(new_user)
+        logger.info(f"New user registered successfully: {user.email}")
+        return new_user
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Registration error: {str(e)}")
+        logger.error(f"Registration error for {user.email}: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Error during registration"
+            detail="Registration failed"
         )
 
 @router.post("/login", response_model=schemas.Token)
@@ -73,9 +79,26 @@ async def login(
                 severity="WARNING"
             )
             
+            logger.warning(f"Failed login attempt for: {user_credentials.email}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Check if user is active
+        if not user.is_active:
+            logger.warning(f"Login attempt for inactive user: {user.email}")
+            crud.create_audit_log(
+                db=db,
+                action="LOGIN_FAILED",
+                details=f"Login attempt for inactive user: {user.email}",
+                ip_address=get_client_ip(request),
+                severity="WARNING"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account is inactive",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
@@ -96,16 +119,31 @@ async def login(
             severity="INFO"
         )
         
+        logger.info(f"User logged in successfully: {user.email}")
         return {
             "access_token": access_token,
             "token_type": "bearer"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Login error: {str(e)}")
+        logger.error(f"Login error for {user_credentials.email}: {str(e)}")
+        # Log the error in audit log as well
+        try:
+            crud.create_audit_log(
+                db=db,
+                action="LOGIN_ERROR",
+                details=f"Login system error for {user_credentials.email}: {str(e)}",
+                ip_address=get_client_ip(request),
+                severity="ERROR"
+            )
+        except:
+            pass  # Don't fail if audit log fails
+        
         raise HTTPException(
-            status_code=500,
-            detail="Error during login"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Login system error"
         )
 
 @router.get("/me", response_model=schemas.User)
@@ -115,11 +153,11 @@ async def get_current_user_info(
 ):
     """Get current user information."""
     try:
-        return schemas.User.from_orm(current_user)
+        logger.info(f"User info requested by: {current_user.email}")
+        return current_user
     except Exception as e:
-        logger.error(f"Error getting user info: {str(e)}")
+        logger.error(f"Error getting user info for {current_user.email}: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail="Error retrieving user information"
         )
-    
