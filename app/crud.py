@@ -27,11 +27,31 @@ def get_user_by_email(db: Session, email: str):
     return db.query(models.User).filter(models.User.email == email).first()
 
 def create_user(db: Session, user: schemas.UserCreate):
-    """Create new user."""
-    hashed_password = auth.get_password_hash(user.password)
+    """Create new user - handles both email/password and OAuth users."""
+    # For OAuth users, password will be None
+    hashed_password = None
+    if user.password:
+        hashed_password = auth.get_password_hash(user.password)
+    
     db_user = models.User(
         email=user.email,
-        hashed_password=hashed_password
+        hashed_password=hashed_password,
+        auth_provider=user.auth_provider or "email",
+        full_name=user.full_name
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+def create_oauth_user(db: Session, email: str, full_name: str = None, provider: str = "google"):
+    """Create a new OAuth user."""
+    db_user = models.User(
+        email=email,
+        hashed_password=None,  # OAuth users don't have passwords
+        auth_provider=provider,
+        full_name=full_name,
+        is_active=True
     )
     db.add(db_user)
     db.commit()
@@ -58,7 +78,7 @@ def get_user_queries(db: Session, user_id: int, skip: int = 0, limit: int = 100)
     """Get user's query history."""
     return db.query(models.QueryHistory).filter(
         models.QueryHistory.user_id == user_id
-    ).offset(skip).limit(limit).all()
+    ).order_by(models.QueryHistory.created_at.desc()).offset(skip).limit(limit).all()
 
 def get_query_count(db: Session, user_id: int) -> int:
     """Get total query count for user."""
@@ -90,4 +110,4 @@ def create_audit_log(
 
 def get_audit_logs(db: Session, skip: int = 0, limit: int = 100):
     """Get audit logs (admin only)."""
-    return db.query(models.AuditLog).offset(skip).limit(limit).all()
+    return db.query(models.AuditLog).order_by(models.AuditLog.created_at.desc()).offset(skip).limit(limit).all()

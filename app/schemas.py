@@ -7,7 +7,6 @@ class UserBase(BaseModel):
     email: EmailStr
     auth_provider: Optional[str] = "email"
     full_name: Optional[str] = None
-    avatar_url: Optional[str] = None
 
 class UserCreate(UserBase):
     password: Optional[str] = None  # Optional for OAuth users
@@ -74,6 +73,5 @@ class GoogleToken(BaseModel):
 class GoogleUserInfo(BaseModel):
     email: EmailStr
     name: Optional[str] = None
-    picture: Optional[str] = None
     given_name: Optional[str] = None
     family_name: Optional[str] = None

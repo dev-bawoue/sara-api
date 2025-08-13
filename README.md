@@ -36,7 +36,7 @@ A secure FastAPI application with PostgreSQL database for handling AI queries wi
 1. **Create `.env` file in your project root:**
 
    ```env
-   DATABASE_URL=postgresql://your_username:your_password@localhost/SARALOGIN
+   DATABASE_URL=postgresql://your_username:your_password@localhost/SARADATABASE
    SECRET_KEY=your-super-secret-key-here-make-it-very-long-and-random-at-least-32-characters
    ALGORITHM=HS256
    ACCESS_TOKEN_EXPIRE_MINUTES=30
@@ -229,4 +229,6 @@ python -m uvicorn app.main:app --reload --log-level debug
 ##  License
 
 This project is licensed under the MIT License.
+## pip install -r requirements.txt
+## .\venv\Scripts\activate
 ## o run use python -m uvicorn app.main:app --reload
