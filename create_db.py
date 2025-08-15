@@ -1,144 +1,123 @@
 #!/usr/bin/env python3
 """
-Database initialization script for SARA API
-Run this script to create the PostgreSQL database and tables.
+Database migration script to add conversation_history table and update query_history table
 """
 
 import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Database connection parameters
 DB_HOST = "localhost"
 DB_PORT = "5432"
-DB_USER = "postgres"  # Replace with your PostgreSQL username
-DB_PASSWORD = ""  # Replace with your PostgreSQL password
-DB_NAME = "SARALOGIN"
+DB_USER = "postgres"  
+DB_PASSWORD = ""  
+DB_NAME = "SARADATABASE"  
 
-def create_database():
-    """Create the SARALOGIN database if it doesn't exist."""
+def run_migration():
     try:
-        # Connect to PostgreSQL server (not to a specific database)
         conn = psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
             user=DB_USER,
             password=DB_PASSWORD,
-            database="postgres"  # Connect to default postgres database
+            database=DB_NAME
         )
-        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
         
-        # Check if database exists
-        cursor.execute(
-            "SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s",
-            (DB_NAME.lower(),)
-        )
-        exists = cursor.fetchone()
+        print("🔄 Running conversation history migration...")
         
-        if not exists:
-            cursor.execute(f'CREATE DATABASE "{DB_NAME}"')
-            print(f" Database '{DB_NAME}' created successfully!")
+        # Create conversation_history table if it doesn't exist
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                conversation_title VARCHAR NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                is_active BOOLEAN DEFAULT true
+            );
+        """)
+        print("✅ Created conversation_history table")
+        
+        # Check if conversation_master_id column exists in query_history
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'query_history' AND column_name = 'conversation_master_id';
+        """)
+        existing_column = cursor.fetchone()
+        
+        if not existing_column:
+            cursor.execute("""
+                ALTER TABLE query_history 
+                ADD COLUMN conversation_master_id INTEGER REFERENCES conversation_history(id);
+            """)
+            print("✅ Added conversation_master_id column to query_history")
         else:
-            print(f"ℹ  Database '{DB_NAME}' already exists.")
+            print("ℹ️  conversation_master_id column already exists")
+        
+        # Create indexes for better performance
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversation_history_user_id ON conversation_history(user_id);
+            CREATE INDEX IF NOT EXISTS idx_conversation_history_updated_at ON conversation_history(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_query_history_conversation_master_id ON query_history(conversation_master_id);
+        """)
+        print("✅ Created indexes")
+        
+        # Migrate existing queries to conversation_history
+        cursor.execute("""
+            SELECT DISTINCT user_id FROM query_history WHERE conversation_master_id IS NULL;
+        """)
+        users_with_orphaned_queries = cursor.fetchall()
+        
+        for (user_id,) in users_with_orphaned_queries:
+            # Create a default conversation for existing queries
+            cursor.execute("""
+                INSERT INTO conversation_history (user_id, conversation_title, created_at, updated_at)
+                VALUES (%s, 'Previous Conversation', NOW(), NOW())
+                RETURNING id;
+            """, (user_id,))
+            conversation_id = cursor.fetchone()[0]
             
+            # Update orphaned queries to belong to this conversation
+            cursor.execute("""
+                UPDATE query_history 
+                SET conversation_master_id = %s 
+                WHERE user_id = %s AND conversation_master_id IS NULL;
+            """, (conversation_id, user_id))
+        
+        if users_with_orphaned_queries:
+            print(f"✅ Migrated existing queries for {len(users_with_orphaned_queries)} users")
+        
+        conn.commit()
         cursor.close()
         conn.close()
         
-    except Exception as e:
-        print(f" Error creating database: {e}")
-        return False
-    
-    return True
-
-def create_tables():
-    """Create tables using SQLAlchemy."""
-    try:
-        from app.database import engine
-        from app import models
-        
-        # Create all tables
-        models.Base.metadata.create_all(bind=engine)
-        print(" All tables created successfully!")
+        print("🎉 Migration completed successfully!")
         
     except Exception as e:
-        print(f" Error creating tables: {e}")
-        return False
-    
-    return True
-
-def create_admin_user():
-    """Create an admin user."""
-    try:
-        from sqlalchemy.orm import sessionmaker
-        from app.database import engine
-        from app import models, auth
-        
-        Session = sessionmaker(bind=engine)
-        session = Session()
-        
-        # Check if admin user exists
-        admin_email = "admin@sara.com"
-        existing_admin = session.query(models.User).filter(
-            models.User.email == admin_email
-        ).first()
-        
-        if not existing_admin:
-            # Create admin user
-            hashed_password = auth.get_password_hash("admin123")  # Change this password!
-            admin_user = models.User(
-                email=admin_email,
-                hashed_password=hashed_password,
-                is_active=True
-            )
-            session.add(admin_user)
-            session.commit()
-            print(f" Admin user created: {admin_email} (password: admin123)")
-            print("  IMPORTANT: Change the admin password after first login!")
-        else:
-            print(f"ℹ  Admin user already exists: {admin_email}")
-        
-        session.close()
-        
-    except Exception as e:
-        print(f" Error creating admin user: {e}")
+        print(f"❌ Error running migration: {e}")
         return False
     
     return True
 
 def main():
-    """Main initialization function."""
-    print(" Initializing SARA API Database...")
+    print("📊 SARA API Conversation History Migration")
     print("=" * 50)
     
-    # Step 1: Create database
-    print("1. Creating database...")
-    if not create_database():
-        print(" Database creation failed. Exiting.")
+    print("⚠️  Make sure to backup your database before running this migration!")
+    confirm = input("Do you want to proceed? (y/N): ").lower().strip()
+    
+    if confirm not in ['y', 'yes']:
+        print("Migration cancelled.")
         return
     
-    # Step 2: Create tables
-    print("\n2. Creating tables...")
-    if not create_tables():
-        print(" Table creation failed. Exiting.")
-        return
-    
-    # Step 3: Create admin user
-    print("\n3. Creating admin user...")
-    if not create_admin_user():
-        print(" Admin user creation failed. Exiting.")
-        return
-    
-    print("\n" + "=" * 50)
-    print(" Database initialization completed successfully!")
-    print("\n Next steps:")
-    print("1. Update your .env file with the correct DATABASE_URL")
-    print("2. Install requirements: pip install -r requirements.txt")
-    print("3. Run the API: python -m uvicorn app.main:app --reload")
-    print("4. Access the API documentation at: http://localhost:8000/docs")
+    if run_migration():
+        print("\n✅ You can now restart your API server with conversation history support.")
+    else:
+        print("\n❌ Migration failed. Please check the error messages above.")
 
 if __name__ == "__main__":
     main()

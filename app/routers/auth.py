@@ -19,8 +19,15 @@ async def register(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """Register new user."""
+    """Register new user with email and password."""
     try:
+        # Validate that password is provided for email registration
+        if not user.password:
+            raise HTTPException(
+                status_code=400,
+                detail="Password is required for email registration"
+            )
+        
         # Check if user already exists
         db_user = crud.get_user_by_email(db, email=user.email)
         if db_user:
@@ -61,25 +68,29 @@ async def login(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """Authenticate user and return token."""
+    """Authenticate user with email and password."""
     try:
-        user = auth.authenticate_user(
-            db, 
-            user_credentials.email, 
-            user_credentials.password
-        )
+        # Validate that password is provided for email login
+        if not user_credentials.password:
+            logger.warning(f"Login attempt without password for: {user_credentials.email}")
+            raise HTTPException(
+                status_code=400,
+                detail="Password is required for email login"
+            )
         
+        # First, check if user exists
+        user = crud.get_user_by_email(db, user_credentials.email)
         if not user:
-            # Log failed login attempt
+            # Log failed login attempt - user not found
             crud.create_audit_log(
                 db=db,
                 action="LOGIN_FAILED",
-                details=f"Failed login attempt for: {user_credentials.email}",
+                details=f"Login attempt for non-existent user: {user_credentials.email}",
                 ip_address=get_client_ip(request),
                 severity="WARNING"
             )
             
-            logger.warning(f"Failed login attempt for: {user_credentials.email}")
+            logger.warning(f"Login attempt for non-existent user: {user_credentials.email}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
@@ -102,6 +113,40 @@ async def login(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
+        # Check if this is an OAuth user trying to login with password
+        if user.auth_provider != "email" or user.hashed_password is None:
+            logger.warning(f"Password login attempt for OAuth user: {user.email}")
+            crud.create_audit_log(
+                db=db,
+                action="LOGIN_FAILED",
+                details=f"Password login attempt for OAuth user: {user.email} (provider: {user.auth_provider})",
+                ip_address=get_client_ip(request),
+                severity="WARNING"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="This account uses OAuth login. Please use the appropriate login method.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Verify password
+        if not auth.verify_password(user_credentials.password, user.hashed_password):
+            # Log failed login attempt - wrong password
+            crud.create_audit_log(
+                db=db,
+                action="LOGIN_FAILED",
+                details=f"Failed login attempt (wrong password) for: {user_credentials.email}",
+                ip_address=get_client_ip(request),
+                severity="WARNING"
+            )
+            
+            logger.warning(f"Failed login attempt (wrong password) for: {user_credentials.email}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
         # Create access token
         access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = auth.create_access_token(
@@ -113,7 +158,7 @@ async def login(
         crud.create_audit_log(
             db=db,
             action="LOGIN_SUCCESS",
-            details=f"User logged in: {user.email}",
+            details=f"User logged in: {user.email} (provider: {user.auth_provider})",
             user_id=user.id,
             ip_address=get_client_ip(request),
             severity="INFO"

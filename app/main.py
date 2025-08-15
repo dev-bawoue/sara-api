@@ -7,10 +7,11 @@ from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 import logging
 import traceback
+import os
 
 from app.database import engine
 from app import models
-from app.routers import auth, queries, admin
+from app.routers import auth, queries, admin, google_oauth
 
 # Configure logging
 logging.basicConfig(
@@ -39,7 +40,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="SARA API",
-    description="Secure AI Response Assistant API",
+    description="Secure AI Response Assistant API with Email/Password and Google OAuth support",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -47,10 +48,17 @@ app = FastAPI(
 # Security
 security = HTTPBearer()
 
-# CORS middleware
+# CORS middleware - Updated for Cloud Run
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:8080"],  # Add your frontend URLs
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://localhost:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8080",
+        "https://*.run.app",  # Allow Cloud Run domains
+        "https://*.googleapis.com",  # Allow Google services
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +68,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(queries.router)
 app.include_router(admin.router)
+app.include_router(google_oauth.router)  # Enable Google OAuth
 
 @app.get("/")
 async def root():
@@ -67,12 +76,21 @@ async def root():
     return {
         "message": "SARA API is running",
         "version": "1.0.0",
-        "status": "healthy"
+        "status": "healthy",
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "port": os.getenv("PORT", "8000"),
+        "authentication_methods": ["email_password", "google_oauth"],
+        "endpoints": {
+            "auth": ["/api/register", "/api/login", "/api/me"],
+            "queries": ["/api/submit_query", "/api/history", "/api/quota"],
+            "admin": ["/api/admin/logs", "/api/admin/users", "/api/admin/stats"],
+            "google_oauth": ["/auth/google/login", "/auth/google/callback", "/auth/google/token"]
+        }
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint for Cloud Run."""
     try:
         # Test database connection
         from app.database import engine
@@ -81,7 +99,9 @@ async def health_check():
         return {
             "status": "healthy",
             "database": "connected",
-            "message": "All systems operational"
+            "message": "All systems operational",
+            "environment": os.getenv("ENVIRONMENT", "development"),
+            "port": os.getenv("PORT", "8000")
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -168,12 +188,14 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
+# Cloud Run compatible main function
 if __name__ == "__main__":
     import uvicorn
+    # Use PORT environment variable from Cloud Run, default to 8080
+    port = int(os.environ.get("PORT", 8080))
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=port,
         log_level="info"
     )

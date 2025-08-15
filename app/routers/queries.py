@@ -7,24 +7,19 @@ from app.database import get_db
 from app import schemas, models, crud
 from app.dependencies import get_current_user, get_client_ip
 
-# Configure Gemini API
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 router = APIRouter(prefix="/api", tags=["queries"])
 
 class LLMProxy:
-    """Proxy for LLM with quota and safety checks."""
-    
-    MAX_DAILY_QUERIES = 100  # Max queries per user per day
+    MAX_DAILY_QUERIES = 100
     
     @staticmethod
     def check_quota(db: Session, user_id: int) -> bool:
-        """Check if user has remaining quota."""
         from datetime import date
         today = date.today()
         
-        # Count today's queries for the user
         today_query_count = db.query(models.QueryHistory).filter(
             models.QueryHistory.user_id == user_id,
             models.QueryHistory.created_at >= today
@@ -34,7 +29,6 @@ class LLMProxy:
     
     @staticmethod
     async def generate_response(query: str) -> str:
-        """Generate response using Gemini API."""
         try:
             response = model.generate_content(query)
             return response.text
@@ -44,6 +38,61 @@ class LLMProxy:
                 detail=f"LLM service error: {str(e)}"
             )
 
+@router.post("/conversations", response_model=schemas.ConversationResponse)
+async def create_conversation(
+    conversation_request: schemas.ConversationRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    conversation = crud.create_conversation(
+        db=db,
+        user_id=current_user.id,
+        title=conversation_request.title
+    )
+    
+    return {
+        "id": conversation.id,
+        "conversation_title": conversation.conversation_title,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+        "is_active": conversation.is_active,
+        "query_count": 0
+    }
+
+@router.get("/conversations", response_model=schemas.ConversationHistoryResponse)
+async def get_conversations(
+    skip: int = 0,
+    limit: int = 20,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    conversations = crud.get_user_conversations(db, current_user.id, skip, limit)
+    total = crud.get_conversation_count(db, current_user.id)
+    
+    return {
+        "conversations": conversations,
+        "total": total
+    }
+
+@router.get("/conversations/{conversation_id}/queries", response_model=List[schemas.QueryResponse])
+async def get_conversation_queries(
+    conversation_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    conversation = db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.id == conversation_id,
+        models.ConversationHistory.user_id == current_user.id
+    ).first()
+    
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    queries = crud.get_conversation_queries(db, conversation_id, skip, limit)
+    return queries
+
 @router.post("/submit_query", response_model=schemas.QueryResponse)
 async def submit_query(
     query_request: schemas.QueryRequest,
@@ -51,9 +100,6 @@ async def submit_query(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Submit query to LLM and save response."""
-    
-    # Check quota
     if not LLMProxy.check_quota(db, current_user.id):
         crud.create_audit_log(
             db=db,
@@ -68,7 +114,6 @@ async def submit_query(
             detail="Daily query quota exceeded"
         )
     
-    # Check for sensitive data
     if crud.SensitiveDataScanner.contains_sensitive_data(query_request.query):
         crud.create_audit_log(
             db=db,
@@ -83,19 +128,28 @@ async def submit_query(
             detail="Query contains sensitive data and cannot be processed"
         )
     
+    conversation_id = query_request.conversation_master_id
+    if not conversation_id:
+        first_words = query_request.query.split()[:6]
+        title = " ".join(first_words) + ("..." if len(query_request.query.split()) > 6 else "")
+        conversation = crud.create_conversation(
+            db=db,
+            user_id=current_user.id,
+            title=title
+        )
+        conversation_id = conversation.id
+    
     try:
-        # Generate response
         response_text = await LLMProxy.generate_response(query_request.query)
         
-        # Save query and response
         query_history = crud.create_query(
             db=db,
             user_id=current_user.id,
             query=query_request.query,
-            response=response_text
+            response=response_text,
+            conversation_master_id=conversation_id
         )
         
-        # Log successful query
         crud.create_audit_log(
             db=db,
             action="QUERY_PROCESSED",
@@ -108,7 +162,6 @@ async def submit_query(
         return query_history
         
     except Exception as e:
-        # Log error
         crud.create_audit_log(
             db=db,
             action="QUERY_ERROR",
@@ -122,6 +175,41 @@ async def submit_query(
             detail="Error processing query"
         )
 
+@router.put("/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: int,
+    conversation_request: schemas.ConversationRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    conversation = db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.id == conversation_id,
+        models.ConversationHistory.user_id == current_user.id
+    ).first()
+    
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    crud.update_conversation_title(db, conversation_id, conversation_request.title)
+    return {"message": "Conversation updated successfully"}
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    conversation = db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.id == conversation_id,
+        models.ConversationHistory.user_id == current_user.id
+    ).first()
+    
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    crud.delete_conversation(db, conversation_id, current_user.id)
+    return {"message": "Conversation deleted successfully"}
+
 @router.get("/history", response_model=schemas.HistoryResponse)
 async def get_query_history(
     skip: int = 0,
@@ -129,7 +217,6 @@ async def get_query_history(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get user's query history."""
     queries = crud.get_user_queries(db, current_user.id, skip, limit)
     total = crud.get_query_count(db, current_user.id)
     
@@ -143,7 +230,6 @@ async def get_quota_status(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get user's quota status."""
     from datetime import date
     today = date.today()
     
