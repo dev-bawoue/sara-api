@@ -58,8 +58,75 @@ def create_oauth_user(db: Session, email: str, full_name: str = None, provider: 
     db.refresh(db_user)
     return db_user
 
+# Conversation CRUD operations
+def create_conversation(db: Session, user_id: int, title: str):
+    """Create new conversation."""
+    db_conversation = models.ConversationHistory(
+        user_id=user_id,
+        conversation_title=title
+    )
+    db.add(db_conversation)
+    db.commit()
+    db.refresh(db_conversation)
+    return db_conversation
+
+def get_user_conversations(db: Session, user_id: int, skip: int = 0, limit: int = 100):
+    """Get user's conversations with query count."""
+    conversations = db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.user_id == user_id,
+        models.ConversationHistory.is_active == True
+    ).order_by(models.ConversationHistory.updated_at.desc()).offset(skip).limit(limit).all()
+    
+    # Add query count to each conversation
+    result = []
+    for conv in conversations:
+        conv_dict = {
+            "id": conv.id,
+            "conversation_title": conv.conversation_title,
+            "created_at": conv.created_at,
+            "updated_at": conv.updated_at,
+            "is_active": conv.is_active,
+            "query_count": len(conv.queries) if conv.queries else 0
+        }
+        result.append(conv_dict)
+    
+    return result
+
+def get_conversation_count(db: Session, user_id: int) -> int:
+    """Get total conversation count for user."""
+    return db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.user_id == user_id,
+        models.ConversationHistory.is_active == True
+    ).count()
+
+def get_conversation_queries(db: Session, conversation_id: int, skip: int = 0, limit: int = 100):
+    """Get queries for a specific conversation."""
+    return db.query(models.QueryHistory).filter(
+        models.QueryHistory.conversation_master_id == conversation_id
+    ).order_by(models.QueryHistory.created_at.asc()).offset(skip).limit(limit).all()
+
+def update_conversation_title(db: Session, conversation_id: int, title: str):
+    """Update conversation title."""
+    db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.id == conversation_id
+    ).update({
+        "conversation_title": title,
+        "updated_at": models.func.now()
+    })
+    db.commit()
+
+def delete_conversation(db: Session, conversation_id: int, user_id: int):
+    """Soft delete conversation and its queries."""
+    # Soft delete conversation
+    db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.id == conversation_id,
+        models.ConversationHistory.user_id == user_id
+    ).update({"is_active": False})
+    
+    db.commit()
+
 # Query CRUD operations
-def create_query(db: Session, user_id: int, query: str, response: str):
+def create_query(db: Session, user_id: int, query: str, response: str, conversation_master_id: int):
     """Create new query history entry."""
     is_sensitive = SensitiveDataScanner.contains_sensitive_data(f"{query} {response}")
     
@@ -67,10 +134,18 @@ def create_query(db: Session, user_id: int, query: str, response: str):
         user_id=user_id,
         query=query,
         response=response,
+        conversation_master_id=conversation_master_id,
         is_sensitive=is_sensitive
     )
     db.add(db_query)
     db.commit()
+    
+    # Update conversation's updated_at timestamp
+    db.query(models.ConversationHistory).filter(
+        models.ConversationHistory.id == conversation_master_id
+    ).update({"updated_at": models.func.now()})
+    db.commit()
+    
     db.refresh(db_query)
     return db_query
 

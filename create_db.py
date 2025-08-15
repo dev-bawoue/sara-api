@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Database migration script to add OAuth columns to existing User table
-Run this script to update your existing database schema.
+Database migration script to add conversation_history table and update query_history table
 """
 
 import psycopg2
@@ -17,9 +16,7 @@ DB_PASSWORD = ""
 DB_NAME = "SARADATABASE"  
 
 def run_migration():
-    """Add OAuth columns to existing users table."""
     try:
-        # Connect to your SARADATABASE database
         conn = psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
@@ -29,73 +26,88 @@ def run_migration():
         )
         cursor = conn.cursor()
         
-        print(" Running database migration...")
+        print("🔄 Running conversation history migration...")
         
-        # Check if columns already exist
+        # Create conversation_history table if it doesn't exist
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                conversation_title VARCHAR NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                is_active BOOLEAN DEFAULT true
+            );
+        """)
+        print("✅ Created conversation_history table")
+        
+        # Check if conversation_master_id column exists in query_history
         cursor.execute("""
             SELECT column_name 
             FROM information_schema.columns 
-            WHERE table_name = 'users' AND column_name IN ('auth_provider', 'full_name', 'avatar_url');
+            WHERE table_name = 'query_history' AND column_name = 'conversation_master_id';
         """)
-        existing_columns = [row[0] for row in cursor.fetchall()]
+        existing_column = cursor.fetchone()
         
-        # Add auth_provider column if it doesn't exist
-        if 'auth_provider' not in existing_columns:
+        if not existing_column:
             cursor.execute("""
-                ALTER TABLE users 
-                ADD COLUMN auth_provider VARCHAR DEFAULT 'email';
+                ALTER TABLE query_history 
+                ADD COLUMN conversation_master_id INTEGER REFERENCES conversation_history(id);
             """)
-            print(" Added auth_provider column")
+            print("✅ Added conversation_master_id column to query_history")
         else:
-            print("  auth_provider column already exists")
+            print("ℹ️  conversation_master_id column already exists")
         
-        # Add full_name column if it doesn't exist
-        if 'full_name' not in existing_columns:
-            cursor.execute("""
-                ALTER TABLE users 
-                ADD COLUMN full_name VARCHAR;
-            """)
-            print(" Added full_name column")
-        else:
-            print("  full_name column already exists")
-        
-        # Add avatar_url column if it doesn't exist
-        if 'avatar_url' not in existing_columns:
-            cursor.execute("""
-                ALTER TABLE users 
-                ADD COLUMN avatar_url VARCHAR;
-            """)
-            print(" Added avatar_url column")
-        else:
-            print("  avatar_url column already exists")
-        
-        # Update existing users to have 'email' as auth_provider
+        # Create indexes for better performance
         cursor.execute("""
-            UPDATE users 
-            SET auth_provider = 'email' 
-            WHERE auth_provider IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_conversation_history_user_id ON conversation_history(user_id);
+            CREATE INDEX IF NOT EXISTS idx_conversation_history_updated_at ON conversation_history(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_query_history_conversation_master_id ON query_history(conversation_master_id);
         """)
-        print(" Updated existing users with email auth provider")
+        print("✅ Created indexes")
         
-        # Commit changes
+        # Migrate existing queries to conversation_history
+        cursor.execute("""
+            SELECT DISTINCT user_id FROM query_history WHERE conversation_master_id IS NULL;
+        """)
+        users_with_orphaned_queries = cursor.fetchall()
+        
+        for (user_id,) in users_with_orphaned_queries:
+            # Create a default conversation for existing queries
+            cursor.execute("""
+                INSERT INTO conversation_history (user_id, conversation_title, created_at, updated_at)
+                VALUES (%s, 'Previous Conversation', NOW(), NOW())
+                RETURNING id;
+            """, (user_id,))
+            conversation_id = cursor.fetchone()[0]
+            
+            # Update orphaned queries to belong to this conversation
+            cursor.execute("""
+                UPDATE query_history 
+                SET conversation_master_id = %s 
+                WHERE user_id = %s AND conversation_master_id IS NULL;
+            """, (conversation_id, user_id))
+        
+        if users_with_orphaned_queries:
+            print(f"✅ Migrated existing queries for {len(users_with_orphaned_queries)} users")
+        
         conn.commit()
         cursor.close()
         conn.close()
         
-        print("\ Migration completed successfully!")
+        print("🎉 Migration completed successfully!")
         
     except Exception as e:
-        print(f" Error running migration: {e}")
+        print(f"❌ Error running migration: {e}")
         return False
     
     return True
 
 def main():
-    """Main migration function."""
-    print(" SARA API Database Migration")
-    print("=" * 40)
+    print("📊 SARA API Conversation History Migration")
+    print("=" * 50)
     
-    print("  Make sure to backup your database before running this migration!")
+    print("⚠️  Make sure to backup your database before running this migration!")
     confirm = input("Do you want to proceed? (y/N): ").lower().strip()
     
     if confirm not in ['y', 'yes']:
@@ -103,9 +115,9 @@ def main():
         return
     
     if run_migration():
-        print("\n You can now restart your API server.")
+        print("\n✅ You can now restart your API server with conversation history support.")
     else:
-        print("\n Migration failed. Please check the error messages above.")
+        print("\n❌ Migration failed. Please check the error messages above.")
 
 if __name__ == "__main__":
     main()
