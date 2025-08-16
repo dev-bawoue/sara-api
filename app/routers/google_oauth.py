@@ -1,8 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2AuthorizationCodeBearer
-from google.oauth2 import id_token
-from google.auth.transport import requests
 import os
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -14,6 +12,7 @@ import logging
 from urllib.parse import urlencode
 import httpx
 import traceback
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -41,56 +40,54 @@ logger.info(f"GOOGLE_REDIRECT_URI: {GOOGLE_REDIRECT_URI}")
 
 router = APIRouter(prefix="/api/auth/google", tags=["google-oauth"])
 
-# Update the get_google_user_info function in App.tsx (should be in your FastAPI router file)
-async def get_google_user_info(token: str) -> dict:
+async def get_google_user_info_from_access_token(access_token: str) -> dict:
+    """Get user info from Google using access token (simpler approach)."""
     try:
-        logger.info("Verifying Google ID token...")
+        logger.info("Getting Google user info from access token...")
         
-        # Add additional verification options
-        idinfo = id_token.verify_oauth2_token(
-            token, 
-            requests.Request(), 
-            GOOGLE_CLIENT_ID,
-            clock_skew_in_seconds=10  # Allow 10 seconds clock skew
+        # Use Google's userinfo endpoint with access token
+        response = requests.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10
         )
-        logger.info(f"Token verified for user: {idinfo.get('email')}")
         
-        # Enhanced issuer verification
-        allowed_issuers = [
-            'accounts.google.com', 
-            'https://accounts.google.com',
-            'https://accounts.google.com/'
-        ]
-        if idinfo['iss'] not in allowed_issuers:
-            raise ValueError(f"Wrong issuer: {idinfo['iss']}")
-            
-        # Verify audience
-        if idinfo['aud'] != GOOGLE_CLIENT_ID:
-            raise ValueError("Token audience doesn't match client ID")
-            
-        # Verify token expiration
-        current_time = int(time.time())
-        if idinfo['exp'] < current_time:
-            raise ValueError("Token has expired")
-            
-        return idinfo
-    except ValueError as e:
-        logger.error(f"Google token verification failed: {str(e)}")
-        logger.error(f"Token (first 50 chars): {token[:50]}" if token else "No token provided")
-        logger.error(f"Full token info: {idinfo if 'idinfo' in locals() else 'No idinfo'}")
+        if response.status_code != 200:
+            logger.error(f"Google userinfo API error: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Failed to get user info from Google"
+            )
+        
+        user_info = response.json()
+        logger.info(f"Successfully got user info for: {user_info.get('email')}")
+        
+        # Validate required fields
+        if not user_info.get('email'):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No email provided by Google"
+            )
+        
+        return user_info
+        
+    except requests.RequestException as e:
+        logger.error(f"Network error getting Google user info: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google authentication token"
+            detail="Failed to connect to Google services"
         )
     except Exception as e:
-        logger.error(f"Unexpected error during token verification: {str(e)}")
+        logger.error(f"Unexpected error getting Google user info: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Google authentication failed"
         )
+
 @router.get("/login")
 async def google_login():
+    """Initiate Google OAuth flow."""
     # Check configuration
     if not all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET]):
         logger.error("Google OAuth environment variables not set")
@@ -124,6 +121,7 @@ async def google_callback(
     prompt: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
+    """Handle Google OAuth callback."""
     try:
         logger.info("=== Google OAuth Callback Started ===")
         logger.info(f"Parameters received:")
@@ -158,7 +156,7 @@ async def google_callback(
                 status_code=302
             )
         
-        logger.info("Step 1: Exchanging authorization code for tokens...")
+        logger.info("Step 1: Exchanging authorization code for access token...")
         
         token_url = "https://oauth2.googleapis.com/token"
         data = {
@@ -202,23 +200,24 @@ async def google_callback(
                     status_code=302
                 )
             
-            id_token_str = token_data.get("id_token")
-            if not id_token_str:
-                logger.error("No ID token received from Google")
+            # Get access token (not ID token)
+            access_token = token_data.get("access_token")
+            if not access_token:
+                logger.error("No access token received from Google")
                 logger.error(f"Available keys in token_data: {list(token_data.keys())}")
                 return RedirectResponse(
-                    url=f"{FRONTEND_URL}/?error=no_id_token",
+                    url=f"{FRONTEND_URL}/?error=no_access_token",
                     status_code=302
                 )
             
-            logger.info("Step 2: Verifying Google ID token...")
+            logger.info("Step 2: Getting user info from Google...")
             try:
-                user_info = await get_google_user_info(id_token_str)
+                user_info = await get_google_user_info_from_access_token(access_token)
                 logger.info(f"User info received: {user_info.get('email')}")
             except Exception as e:
-                logger.error(f"Token verification failed: {e}")
+                logger.error(f"Failed to get user info: {e}")
                 return RedirectResponse(
-                    url=f"{FRONTEND_URL}/?error=token_verification_failed",
+                    url=f"{FRONTEND_URL}/?error=user_info_failed",
                     status_code=302
                 )
             
@@ -254,16 +253,16 @@ async def google_callback(
                         status_code=302
                     )
                 
-                logger.info("Step 4: Creating access token...")
+                logger.info("Step 4: Creating our own JWT access token...")
                 
-                # Create access token
+                # Create our own JWT access token (same as email/password login)
                 access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
-                access_token = auth.create_access_token(
+                our_access_token = auth.create_access_token(
                     data={"sub": user.email},
                     expires_delta=access_token_expires
                 )
                 
-                logger.info(f"Access token created for user: {user.email}")
+                logger.info(f"JWT access token created for user: {user.email}")
                 
                 # Log successful login
                 try:
@@ -280,8 +279,8 @@ async def google_callback(
                 
                 logger.info("Step 5: Redirecting to frontend...")
                 
-                # Redirect to frontend with token
-                redirect_url = f"{FRONTEND_URL}/parents?token={access_token}"
+                # Redirect to frontend with our JWT token
+                redirect_url = f"{FRONTEND_URL}/parents?token={our_access_token}"
                 logger.info(f"Redirecting to: {redirect_url}")
                 
                 return RedirectResponse(
@@ -303,70 +302,6 @@ async def google_callback(
         return RedirectResponse(
             url=f"{FRONTEND_URL}/?error=unexpected_error",
             status_code=302
-        )
-
-@router.post("/token")
-async def google_token_login(
-    token_data: dict,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    try:
-        logger.info("Google token login attempt")
-        
-        id_token_str = token_data.get("id_token")
-        if not id_token_str:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="ID token is required"
-            )
-        
-        user_info = await get_google_user_info(id_token_str)
-        user = crud.get_user_by_email(db, email=user_info["email"])
-        
-        if not user:
-            user = crud.create_oauth_user(
-                db=db,
-                email=user_info["email"],
-                full_name=user_info.get("name"),
-                provider="google"
-            )
-        
-        if not user.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account is inactive"
-            )
-        
-        access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = auth.create_access_token(
-            data={"sub": user.email},
-            expires_delta=access_token_expires
-        )
-        
-        # Log successful login
-        try:
-            crud.create_audit_log(
-                db=db,
-                action="LOGIN_SUCCESS_GOOGLE_TOKEN",
-                details=f"User logged in via Google token: {user.email}",
-                user_id=user.id,
-                ip_address=request.client.host if request.client else None,
-                severity="INFO"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create audit log: {e}")
-        
-        return Token(access_token=access_token, token_type="bearer")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Google token login error: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate Google token"
         )
 
 # Health check endpoint for Google OAuth
