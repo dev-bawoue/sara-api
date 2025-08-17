@@ -48,20 +48,55 @@ app = FastAPI(
 # Security
 security = HTTPBearer()
 
-# CORS middleware - Updated for Cloud Run
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+# Get the current Cloud Run service URL
+def get_cloud_run_origins():
+    """Get allowed origins for Cloud Run deployment."""
+    origins = [
         "http://localhost:3000", 
         "http://localhost:8080",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:8080",
-        "https://*.run.app",  # Allow Cloud Run domains
-        "https://*.googleapis.com",  # Allow Google services
-    ],
+    ]
+    
+    # Add the specific Cloud Run URL
+    cloud_run_url = "https://sara-api-update-1024279616298.us-east1.run.app"
+    origins.append(cloud_run_url)
+    
+    # Add other Google service origins that might be needed
+    google_origins = [
+        "https://accounts.google.com",
+        "https://oauth2.googleapis.com",
+        "https://www.googleapis.com",
+    ]
+    origins.extend(google_origins)
+    
+    # If we have a frontend URL environment variable, add it
+    frontend_url = os.getenv("FRONTEND_URL")
+    if frontend_url and frontend_url not in origins:
+        origins.append(frontend_url)
+    
+    logger.info(f"CORS allowed origins: {origins}")
+    return origins
+
+# CORS middleware - Fixed for Cloud Run
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_cloud_run_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Origin",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
+    expose_headers=["*"],
+    max_age=3600,  # Cache preflight for 1 hour
 )
 
 # Include routers
@@ -80,11 +115,12 @@ async def root():
         "environment": os.getenv("ENVIRONMENT", "development"),
         "port": os.getenv("PORT", "8000"),
         "authentication_methods": ["email_password", "google_oauth"],
+        "cors_origins": get_cloud_run_origins(),
         "endpoints": {
             "auth": ["/api/register", "/api/login", "/api/me"],
             "queries": ["/api/submit_query", "/api/history", "/api/quota"],
             "admin": ["/api/admin/logs", "/api/admin/users", "/api/admin/stats"],
-            "google_oauth": ["/auth/google/login", "/auth/google/callback", "/auth/google/token"]
+            "google_oauth": ["/api/auth/google/login", "/api/auth/google/callback", "/api/auth/google/health"]
         }
     }
 
@@ -101,7 +137,9 @@ async def health_check():
             "database": "connected",
             "message": "All systems operational",
             "environment": os.getenv("ENVIRONMENT", "development"),
-            "port": os.getenv("PORT", "8000")
+            "port": os.getenv("PORT", "8000"),
+            "cors_configured": True,
+            "allowed_origins": get_cloud_run_origins()
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -110,12 +148,29 @@ async def health_check():
             detail="Service unavailable"
         )
 
+# Add a specific CORS test endpoint
+@app.options("/{path:path}")
+async def options_handler(request: Request, path: str):
+    """Handle all OPTIONS requests for CORS preflight."""
+    response = JSONResponse({"message": "OK"})
+    origin = request.headers.get("origin")
+    
+    if origin in get_cloud_run_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "Accept, Accept-Language, Content-Language, Content-Type, Authorization, X-Requested-With, Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Max-Age"] = "3600"
+    
+    return response
+
 # Custom error handlers
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions with proper logging."""
     logger.warning(f"HTTP exception: {exc.status_code} - {exc.detail} - Path: {request.url.path}")
-    return JSONResponse(
+    
+    response = JSONResponse(
         status_code=exc.status_code,
         content={
             "error": exc.detail,
@@ -123,12 +178,21 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "path": str(request.url.path)
         }
     )
+    
+    # Add CORS headers to error responses
+    origin = request.headers.get("origin")
+    if origin in get_cloud_run_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors."""
     logger.warning(f"Validation error: {exc.errors()} - Path: {request.url.path}")
-    return JSONResponse(
+    
+    response = JSONResponse(
         status_code=422,
         content={
             "error": "Validation Error",
@@ -137,6 +201,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "path": str(request.url.path)
         }
     )
+    
+    # Add CORS headers to error responses
+    origin = request.headers.get("origin")
+    if origin in get_cloud_run_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 @app.exception_handler(500)
 async def internal_server_error_handler(request: Request, exc: Exception):
@@ -145,7 +217,7 @@ async def internal_server_error_handler(request: Request, exc: Exception):
     logger.error(f"Internal server error [{error_id}]: {str(exc)} - Path: {request.url.path}")
     logger.error(f"Traceback: {traceback.format_exc()}")
     
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={
             "error": "Internal Server Error",
@@ -155,11 +227,19 @@ async def internal_server_error_handler(request: Request, exc: Exception):
             "path": str(request.url.path)
         }
     )
+    
+    # Add CORS headers to error responses
+    origin = request.headers.get("origin")
+    if origin in get_cloud_run_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
     """Handle 404 errors."""
-    return JSONResponse(
+    response = JSONResponse(
         status_code=404,
         content={
             "error": "Not Found",
@@ -168,6 +248,14 @@ async def not_found_handler(request: Request, exc):
             "path": str(request.url.path)
         }
     )
+    
+    # Add CORS headers to error responses
+    origin = request.headers.get("origin")
+    if origin in get_cloud_run_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 # Global exception handler for any unhandled exceptions
 @app.exception_handler(Exception)
@@ -177,7 +265,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception [{error_id}]: {str(exc)} - Path: {request.url.path}")
     logger.error(f"Traceback: {traceback.format_exc()}")
     
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={
             "error": "Internal Server Error",
@@ -187,6 +275,14 @@ async def global_exception_handler(request: Request, exc: Exception):
             "path": str(request.url.path)
         }
     )
+    
+    # Add CORS headers to error responses
+    origin = request.headers.get("origin")
+    if origin in get_cloud_run_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 # Cloud Run compatible main function
 if __name__ == "__main__":
