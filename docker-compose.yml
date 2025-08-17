@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15
+    container_name: sara_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB: SARADATABASE
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  fastapi:
+    image: us-east1-docker.pkg.dev/precise-equator-274319/sara
+    container_name: sara_api
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql://postgres:mysecretpassword@db:5432/SARADATABASE
+    ports:
+      - "8000:8000"
+
+volumes:
+  db_data:

@@ -5,18 +5,19 @@ steps:
       [
         "build",
         "-t",
-        "gcr.io/$PROJECT_ID/sara-api:$COMMIT_SHA",
+        "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:$COMMIT_SHA",
         "-t",
-        "gcr.io/$PROJECT_ID/sara-api:latest",
+        "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:latest",
         ".",
       ]
 
-  # Push the container image to Container Registry
+  # Push the container image to Artifact Registry
   - name: "gcr.io/cloud-builders/docker"
-    args: ["push", "gcr.io/$PROJECT_ID/sara-api:$COMMIT_SHA"]
+    args:
+      ["push", "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:$COMMIT_SHA"]
 
   - name: "gcr.io/cloud-builders/docker"
-    args: ["push", "gcr.io/$PROJECT_ID/sara-api:latest"]
+    args: ["push", "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:latest"]
 
   # Deploy container image to Cloud Run
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -27,27 +28,45 @@ steps:
         "deploy",
         "sara-api",
         "--image",
-        "gcr.io/$PROJECT_ID/sara-api:$COMMIT_SHA",
+        "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:$COMMIT_SHA",
         "--region",
-        "us-central1",
+        "us-east1",
         "--platform",
         "managed",
         "--allow-unauthenticated",
         "--port",
         "8080",
         "--memory",
-        "2Gi",
+        "1Gi",
         "--cpu",
         "1",
         "--max-instances",
         "10",
+        "--add-cloudsql-instances",
+        "$PROJECT_ID:us-east1:sara-postgres",
         "--set-env-vars",
-        "ENVIRONMENT=production,PORT=8080",
+        "ENVIRONMENT=production,PORT=8080,ALGORITHM=HS256,ACCESS_TOKEN_EXPIRE_MINUTES=30,PROJECT_ID=$PROJECT_ID",
+        "--set-secrets",
+        "DATABASE_URL=DATABASE_URL:latest,SECRET_KEY=SECRET_KEY:latest,ADMIN_EMAIL=ADMIN_EMAIL:latest,ADMIN_PASSWORD=ADMIN_PASSWORD:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
+      ]
+
+  # Run database migrations
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "jobs",
+        "execute",
+        "sara-api-migration",
+        "--region",
+        "us-east1",
+        "--wait",
       ]
 
 images:
-  - "gcr.io/$PROJECT_ID/sara-api:$COMMIT_SHA"
-  - "gcr.io/$PROJECT_ID/sara-api:latest"
+  - "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:$COMMIT_SHA"
+  - "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:latest"
 
 options:
   logging: CLOUD_LOGGING_ONLY
