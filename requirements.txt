@@ -1,6 +1,5 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-sqlalchemy==1.4.46
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
@@ -15,5 +14,7 @@ google-auth-oauthlib==1.0.0
 httpx==0.25.0
 google-cloud-bigquery==3.11.4
 google-cloud-core==2.3.3
+google-oauth2-tool==0.0.3
 pandas==2.0.3
 numpy==1.24.3
+google-cloud-secret-manager==2.16.4

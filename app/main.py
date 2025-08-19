@@ -9,8 +9,7 @@ import logging
 import traceback
 import os
 
-from app.database import engine
-from app import models
+from app.bigquery_database import get_bq_db
 from app.routers import auth, queries, admin, google_oauth
 
 # Configure logging
@@ -24,9 +23,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     try:
-        # Create database tables
-        models.Base.metadata.create_all(bind=engine)
-        logger.info("Database tables created successfully")
+        # Initialize BigQuery database
+        bq_db = get_bq_db()
+        if bq_db.test_connection():
+            logger.info("BigQuery database connection successful")
+        else:
+            logger.error("BigQuery database connection failed")
+            raise Exception("Database connection failed")
         
         yield
         
@@ -40,8 +43,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="SARA API",
-    description="Secure AI Response Assistant API with Email/Password and Google OAuth support",
-    version="1.0.0",
+    description="Secure AI Response Assistant API with BigQuery and Google OAuth support",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -58,9 +61,12 @@ def get_cloud_run_origins():
         "http://127.0.0.1:8080",
     ]
     
-    # Add the specific Cloud Run URL
-    cloud_run_url = "https://sara-api-update-1024279616298.us-east1.run.app"
-    origins.append(cloud_run_url)
+    # Add the specific Cloud Run URLs
+    cloud_run_urls = [
+        "https://sara-api-update-1024279616298.us-east1.run.app",
+        "https://sara-frontend-1024279616298.us-east1.run.app"
+    ]
+    origins.extend(cloud_run_urls)
     
     # Add other Google service origins that might be needed
     google_origins = [
@@ -109,11 +115,12 @@ app.include_router(google_oauth.router)  # Enable Google OAuth
 async def root():
     """Root endpoint."""
     return {
-        "message": "SARA API is running",
-        "version": "1.0.0",
+        "message": "SARA API is running with BigQuery",
+        "version": "2.0.0",
         "status": "healthy",
         "environment": os.getenv("ENVIRONMENT", "development"),
         "port": os.getenv("PORT", "8000"),
+        "database": "BigQuery",
         "authentication_methods": ["email_password", "google_oauth"],
         "cors_origins": get_cloud_run_origins(),
         "endpoints": {
@@ -128,14 +135,15 @@ async def root():
 async def health_check():
     """Health check endpoint for Cloud Run."""
     try:
-        # Test database connection
-        from app.database import engine
-        with engine.connect() as conn:
-            conn.execute("SELECT 1")
+        # Test BigQuery connection
+        bq_db = get_bq_db()
+        connection_ok = bq_db.test_connection()
+        
         return {
-            "status": "healthy",
-            "database": "connected",
-            "message": "All systems operational",
+            "status": "healthy" if connection_ok else "unhealthy",
+            "database": "BigQuery",
+            "database_connection": "connected" if connection_ok else "failed",
+            "message": "All systems operational" if connection_ok else "Database connection failed",
             "environment": os.getenv("ENVIRONMENT", "development"),
             "port": os.getenv("PORT", "8000"),
             "cors_configured": True,
