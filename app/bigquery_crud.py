@@ -710,6 +710,8 @@ def get_conversation_by_id(conversation_id: str, user_id: str) -> Optional[Conve
             'conversation_id': decrypted_id,
             'user_id': user_id
         })
+
+        
         
         if results:
             return ConversationHistory.from_dict(results[0])

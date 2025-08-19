@@ -149,7 +149,7 @@ gcloud run deploy $SERVICE_NAME \
     --platform=managed \
     --region=$REGION \
     --allow-unauthenticated \
-    --port=8080 \
+    --port=8000 \
     --memory=2Gi \
     --cpu=2 \
     --timeout=300 \

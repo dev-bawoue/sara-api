@@ -56,9 +56,9 @@ def get_cloud_run_origins():
     """Get allowed origins for Cloud Run deployment."""
     origins = [
         "http://localhost:3000", 
-        "http://localhost:8080",
+        "http://localhost:8000",
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:8080",
+        "http://127.0.0.1:8000",
     ]
     
     # Add the specific Cloud Run URLs
@@ -295,8 +295,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Cloud Run compatible main function
 if __name__ == "__main__":
     import uvicorn
-    # Use PORT environment variable from Cloud Run, default to 8080
-    port = int(os.environ.get("PORT", 8080))
+    # Use PORT environment variable from Cloud Run, default to 6555
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
