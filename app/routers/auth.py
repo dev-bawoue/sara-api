@@ -22,34 +22,50 @@ async def register(
     """Register new user with email and password."""
     try:
         # Validate that password is provided for email registration
-        if not user.password:
+        if not user.password or len(user.password.strip()) == 0:
             raise HTTPException(
                 status_code=400,
                 detail="Password is required for email registration"
             )
         
+        # Normalize and validate email
+        email = user.email.strip().lower()
+        if not email:
+            raise HTTPException(
+                status_code=400,
+                detail="Valid email is required"
+            )
+        
         # Check if user already exists
-        db_user = crud.get_user_by_email(email=user.email)
+        db_user = crud.get_user_by_email(email=email)
         if db_user:
-            logger.warning(f"Registration attempt with existing email: {user.email}")
+            logger.warning(f"Registration attempt with existing email: {email}")
             raise HTTPException(
                 status_code=400,
                 detail="Email already registered"
             )
         
+        # Create normalized user object
+        normalized_user = schemas.UserCreate(
+            email=email,
+            password=user.password.strip(),
+            auth_provider=user.auth_provider or "email",
+            full_name=user.full_name.strip() if user.full_name else None
+        )
+        
         # Create new user (will be assigned client role by default)
-        new_user = crud.create_user(user=user)
+        new_user = crud.create_user(user=normalized_user)
         
         # Log registration
         crud.create_audit_log(
             action="USER_REGISTRATION",
-            details=f"New user registered: {user.email}",
+            details=f"New user registered: {email}",
             user_id=new_user.id,
             ip_address=get_client_ip(request),
             severity="INFO"
         )
         
-        logger.info(f"New user registered successfully: {user.email}")
+        logger.info(f"New user registered successfully: {email}")
         
         # Convert BigQuery model to response format with encrypted ID
         return schemas.User(
@@ -86,34 +102,45 @@ async def register_admin(
             )
         
         # Validate that password is provided
-        if not user.password:
+        if not user.password or len(user.password.strip()) == 0:
             raise HTTPException(
                 status_code=400,
                 detail="Password is required for admin registration"
             )
         
+        # Normalize email
+        email = user.email.strip().lower()
+        
         # Check if user already exists
-        db_user = crud.get_user_by_email(email=user.email)
+        db_user = crud.get_user_by_email(email=email)
         if db_user:
-            logger.warning(f"Admin registration attempt with existing email: {user.email}")
+            logger.warning(f"Admin registration attempt with existing email: {email}")
             raise HTTPException(
                 status_code=400,
                 detail="Email already registered"
             )
         
+        # Create normalized user object
+        normalized_user = schemas.UserCreate(
+            email=email,
+            password=user.password.strip(),
+            auth_provider=user.auth_provider or "email",
+            full_name=user.full_name.strip() if user.full_name else None
+        )
+        
         # Create new admin user
-        new_user = crud.create_admin_user(user=user)
+        new_user = crud.create_admin_user(user=normalized_user)
         
         # Log registration
         crud.create_audit_log(
             action="ADMIN_USER_REGISTRATION",
-            details=f"New admin user registered by {current_user.email}: {user.email}",
+            details=f"New admin user registered by {current_user.email}: {email}",
             user_id=current_user.id,
             ip_address=get_client_ip(request),
             severity="INFO"
         )
         
-        logger.info(f"New admin user registered successfully: {user.email}")
+        logger.info(f"New admin user registered successfully: {email}")
         
         # Convert BigQuery model to response format with encrypted ID
         return schemas.User(
@@ -142,72 +169,32 @@ async def login(
     """Authenticate user with email and password."""
     try:
         # Validate that password is provided for email login
-        if not user_credentials.password:
+        if not user_credentials.password or len(user_credentials.password.strip()) == 0:
             logger.warning(f"Login attempt without password for: {user_credentials.email}")
             raise HTTPException(
                 status_code=400,
                 detail="Password is required for email login"
             )
         
-        # First, check if user exists
-        user = crud.get_user_by_email(user_credentials.email)
+        # Normalize email
+        email = user_credentials.email.strip().lower()
+        password = user_credentials.password.strip()
+        
+        logger.info(f"Login attempt for email: {email}")
+        
+        # Use the new verify_user_password function
+        user = crud.verify_user_password(email, password)
+        
         if not user:
-            # Log failed login attempt - user not found
+            # Log failed login attempt
             crud.create_audit_log(
                 action="LOGIN_FAILED",
-                details=f"Login attempt for non-existent user: {user_credentials.email}",
+                details=f"Failed login attempt for: {email}",
                 ip_address=get_client_ip(request),
                 severity="WARNING"
             )
             
-            logger.warning(f"Login attempt for non-existent user: {user_credentials.email}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        # Check if user is active
-        if not user.is_active:
-            logger.warning(f"Login attempt for inactive user: {user.email}")
-            crud.create_audit_log(
-                action="LOGIN_FAILED",
-                details=f"Login attempt for inactive user: {user.email}",
-                ip_address=get_client_ip(request),
-                severity="WARNING"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Account is inactive",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        # Check if this is an OAuth user trying to login with password
-        if user.auth_provider != "email" or user.hashed_password is None:
-            logger.warning(f"Password login attempt for OAuth user: {user.email}")
-            crud.create_audit_log(
-                action="LOGIN_FAILED",
-                details=f"Password login attempt for OAuth user: {user.email} (provider: {user.auth_provider})",
-                ip_address=get_client_ip(request),
-                severity="WARNING"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="This account uses OAuth login. Please use the appropriate login method.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        # Verify password
-        if not auth.verify_password(user_credentials.password, user.hashed_password):
-            # Log failed login attempt - wrong password
-            crud.create_audit_log(
-                action="LOGIN_FAILED",
-                details=f"Failed login attempt (wrong password) for: {user_credentials.email}",
-                ip_address=get_client_ip(request),
-                severity="WARNING"
-            )
-            
-            logger.warning(f"Failed login attempt (wrong password) for: {user_credentials.email}")
+            logger.warning(f"Login failed for: {email}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
@@ -271,9 +258,9 @@ async def get_current_user_info(
         # Convert BigQuery model to response format with encrypted ID
         return schemas.UserProfile(
             id=current_user.encrypted_id,  # Return encrypted ID
-            email=current_user.email,
+            email=current_user.email,  # Plain text email
             auth_provider=current_user.auth_provider,
-            full_name=current_user.full_name,
+            full_name=current_user.full_name,  # Plain text name
             is_active=current_user.is_active,
             created_at=current_user.created_at,
             role=role_name
@@ -284,3 +271,38 @@ async def get_current_user_info(
             status_code=500,
             detail="Error retrieving user information"
         )
+
+# Test endpoint to verify user lookup
+@router.post("/test-lookup")
+async def test_user_lookup(email: str):
+    """Test endpoint to verify user lookup (remove in production)."""
+    try:
+        user = crud.get_user_by_email(email.strip().lower())
+        if user:
+            return {
+                "found": True,
+                "email": user.email,
+                "id": user.id,
+                "encrypted_id": user.encrypted_id,
+                "has_password": bool(user.hashed_password),
+                "auth_provider": user.auth_provider,
+                "is_active": user.is_active
+            }
+        else:
+            return {"found": False}
+    except Exception as e:
+        return {"error": str(e)}
+
+# Test endpoint for password verification
+@router.post("/test-password")
+async def test_password_verify(email: str, password: str):
+    """Test endpoint for password verification (remove in production)."""
+    try:
+        user = crud.verify_user_password(email.strip().lower(), password)
+        return {
+            "verified": bool(user),
+            "user_found": user is not None,
+            "email": user.email if user else None
+        }
+    except Exception as e:
+        return {"error": str(e)}

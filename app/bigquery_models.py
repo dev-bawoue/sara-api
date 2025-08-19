@@ -1,244 +1,294 @@
 """
-BigQuery data models for SARA API
-Updated with role-based access control and ID encryption
+BigQuery database models
+Fixed version with better ID handling and authentication
 """
 
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, asdict
+from typing import Optional, Dict, Any
 import uuid
+import logging
+from app.bigquery_database import get_bq_db
 
-@dataclass
-class Role:
-    """Role model for BigQuery"""
-    id: str
-    name: str
-    description: Optional[str]
-    created_at: datetime
+logger = logging.getLogger(__name__)
+
+class BaseModel:
+    """Base model with common functionality."""
     
-    @classmethod
-    def create(cls, name: str, description: Optional[str] = None) -> 'Role':
-        """Create a new role instance"""
-        return cls(
-            id=str(uuid.uuid4()),
-            name=name,
-            description=description,
-            created_at=datetime.now(timezone.utc)
-        )
+    def __init__(self):
+        self.id = str(uuid.uuid4())
+        self.created_at = datetime.now(timezone.utc)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for BigQuery insertion"""
-        data = asdict(self)
-        # Convert datetime to string
-        if isinstance(data['created_at'], datetime):
-            data['created_at'] = data['created_at'].isoformat()
-        return data
+        """Convert model to dictionary for BigQuery."""
+        result = {}
+        for key, value in self.__dict__.items():
+            if isinstance(value, datetime):
+                result[key] = value.isoformat()
+            else:
+                result[key] = value
+        return result
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'Role':
-        """Create Role from BigQuery result dictionary"""
-        # Convert ISO string back to datetime if needed
-        if isinstance(data.get('created_at'), str):
-            data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
+    def from_dict(cls, data: Dict[str, Any]):
+        """Create model instance from dictionary."""
+        instance = cls.__new__(cls)  # Create without calling __init__
         
-        return cls(**data)
+        for key, value in data.items():
+            if key.endswith('_at') and isinstance(value, str):
+                # Parse datetime strings
+                try:
+                    if 'T' in value:
+                        setattr(instance, key, datetime.fromisoformat(value.replace('Z', '+00:00')))
+                    else:
+                        setattr(instance, key, datetime.fromisoformat(value))
+                except:
+                    setattr(instance, key, value)
+            else:
+                setattr(instance, key, value)
+        
+        return instance
 
-@dataclass
-class User:
-    """User model for BigQuery with role support"""
-    id: str
-    encrypted_id: str
-    email: str
-    hashed_password: Optional[str]
-    is_active: bool
-    created_at: datetime
-    auth_provider: str = "email"
-    full_name: Optional[str] = None
-    avatar_url: Optional[str] = None
-    role_id: str = None
+class Role(BaseModel):
+    """Role model."""
+    
+    def __init__(self, name: str, description: Optional[str] = None):
+        super().__init__()
+        self.name = name
+        self.description = description
     
     @classmethod
-    def create(cls, email: str, role_id: str, hashed_password: Optional[str] = None, 
+    def create(cls, name: str, description: Optional[str] = None):
+        """Create a new role."""
+        return cls(name=name, description=description)
+
+class User(BaseModel):
+    """User model with proper authentication handling."""
+    
+    def __init__(self, email: str, role_id: str, hashed_password: Optional[str] = None,
+                 auth_provider: str = "email", full_name: Optional[str] = None,
+                 avatar_url: Optional[str] = None):
+        super().__init__()
+        self.email = email.strip().lower()  # Always normalize email
+        self.role_id = role_id
+        self.hashed_password = hashed_password
+        self.is_active = True
+        self.auth_provider = auth_provider
+        self.full_name = full_name
+        self.avatar_url = avatar_url
+        self._encrypted_id = None  # Cache for encrypted ID
+    
+    @property
+    def encrypted_id(self) -> str:
+        """Get encrypted ID, generating it if not cached."""
+        if not self._encrypted_id:
+            try:
+                bq_db = get_bq_db()
+                self._encrypted_id = bq_db.id_crypto.encrypt_id(self.id)
+            except Exception as e:
+                logger.error(f"Error encrypting ID: {e}")
+                self._encrypted_id = f"enc_{self.id[:8]}"  # Fallback
+        return self._encrypted_id
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for BigQuery storage."""
+        result = super().to_dict()
+        # Add encrypted_id to stored data
+        result['encrypted_id'] = self.encrypted_id
+        # Remove cached property
+        if '_encrypted_id' in result:
+            del result['_encrypted_id']
+        return result
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        """Create User from dictionary with proper handling."""
+        # Create instance without calling __init__
+        instance = cls.__new__(cls)
+        
+        # Set all attributes
+        for key, value in data.items():
+            if key == 'encrypted_id':
+                instance._encrypted_id = value  # Cache the encrypted ID
+            elif key.endswith('_at') and isinstance(value, str):
+                # Parse datetime strings
+                try:
+                    if 'T' in value:
+                        setattr(instance, key, datetime.fromisoformat(value.replace('Z', '+00:00')))
+                    else:
+                        setattr(instance, key, datetime.fromisoformat(value))
+                except:
+                    setattr(instance, key, value)
+            else:
+                setattr(instance, key, value)
+        
+        # Ensure email is normalized
+        if hasattr(instance, 'email') and instance.email:
+            instance.email = instance.email.strip().lower()
+        
+        return instance
+    
+    @classmethod
+    def create(cls, email: str, role_id: str, hashed_password: Optional[str] = None,
                auth_provider: str = "email", full_name: Optional[str] = None,
-               avatar_url: Optional[str] = None, encrypted_id: str = None) -> 'User':
-        """Create a new user instance"""
-        user_id = str(uuid.uuid4())
+               avatar_url: Optional[str] = None):
+        """Create a new user."""
         return cls(
-            id=user_id,
-            encrypted_id=encrypted_id or f"enc_{user_id[:8]}",  # Will be properly encrypted in database layer
             email=email,
+            role_id=role_id,
             hashed_password=hashed_password,
-            is_active=True,
-            created_at=datetime.now(timezone.utc),
             auth_provider=auth_provider,
             full_name=full_name,
-            avatar_url=avatar_url,
-            role_id=role_id
+            avatar_url=avatar_url
         )
+
+class ConversationHistory(BaseModel):
+    """Conversation history model."""
+    
+    def __init__(self, user_id: str, conversation_title: str):
+        super().__init__()
+        self.user_id = user_id
+        self.conversation_title = conversation_title
+        self.updated_at = self.created_at
+        self.is_active = True
+        self._encrypted_id = None
+    
+    @property
+    def encrypted_id(self) -> str:
+        """Get encrypted ID."""
+        if not self._encrypted_id:
+            try:
+                bq_db = get_bq_db()
+                self._encrypted_id = bq_db.id_crypto.encrypt_id(self.id)
+            except Exception as e:
+                logger.error(f"Error encrypting conversation ID: {e}")
+                self._encrypted_id = f"conv_{self.id[:8]}"
+        return self._encrypted_id
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for BigQuery insertion"""
-        data = asdict(self)
-        # Convert datetime to string
-        if isinstance(data['created_at'], datetime):
-            data['created_at'] = data['created_at'].isoformat()
-        return data
+        """Convert to dictionary."""
+        result = super().to_dict()
+        result['encrypted_id'] = self.encrypted_id
+        if '_encrypted_id' in result:
+            del result['_encrypted_id']
+        return result
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'User':
-        """Create User from BigQuery result dictionary"""
-        # Convert ISO string back to datetime if needed
-        if isinstance(data.get('created_at'), str):
-            data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
-        
-        return cls(**data)
+    def from_dict(cls, data: Dict[str, Any]):
+        """Create from dictionary."""
+        instance = super().from_dict(data)
+        if 'encrypted_id' in data:
+            instance._encrypted_id = data['encrypted_id']
+        return instance
+    
+    @classmethod
+    def create(cls, user_id: str, conversation_title: str):
+        """Create a new conversation."""
+        return cls(user_id=user_id, conversation_title=conversation_title)
 
-@dataclass
-class ConversationHistory:
-    """Conversation history model for BigQuery with encrypted ID"""
-    id: str
-    encrypted_id: str
-    user_id: str
-    conversation_title: str
-    created_at: datetime
-    updated_at: datetime
-    is_active: bool = True
+class QueryHistory(BaseModel):
+    """Query history model."""
     
-    @classmethod
-    def create(cls, user_id: str, conversation_title: str, encrypted_id: str = None) -> 'ConversationHistory':
-        """Create a new conversation instance"""
-        now = datetime.now(timezone.utc)
-        conv_id = str(uuid.uuid4())
-        return cls(
-            id=conv_id,
-            encrypted_id=encrypted_id or f"enc_{conv_id[:8]}",  # Will be properly encrypted in database layer
-            user_id=user_id,
-            conversation_title=conversation_title,
-            created_at=now,
-            updated_at=now,
-            is_active=True
-        )
+    def __init__(self, user_id: str, query: str, response: str,
+                 conversation_master_id: Optional[str] = None, is_sensitive: bool = False):
+        super().__init__()
+        self.user_id = user_id
+        self.query = query
+        self.response = response
+        self.conversation_master_id = conversation_master_id
+        self.is_sensitive = is_sensitive
+        self._encrypted_id = None
+    
+    @property
+    def encrypted_id(self) -> str:
+        """Get encrypted ID."""
+        if not self._encrypted_id:
+            try:
+                bq_db = get_bq_db()
+                self._encrypted_id = bq_db.id_crypto.encrypt_id(self.id)
+            except Exception as e:
+                logger.error(f"Error encrypting query ID: {e}")
+                self._encrypted_id = f"query_{self.id[:8]}"
+        return self._encrypted_id
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for BigQuery insertion"""
-        data = asdict(self)
-        # Convert datetime to string
-        for field in ['created_at', 'updated_at']:
-            if isinstance(data[field], datetime):
-                data[field] = data[field].isoformat()
-        return data
+        """Convert to dictionary."""
+        result = super().to_dict()
+        result['encrypted_id'] = self.encrypted_id
+        if '_encrypted_id' in result:
+            del result['_encrypted_id']
+        return result
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ConversationHistory':
-        """Create ConversationHistory from BigQuery result dictionary"""
-        # Convert ISO strings back to datetime if needed
-        for field in ['created_at', 'updated_at']:
-            if isinstance(data.get(field), str):
-                data[field] = datetime.fromisoformat(data[field].replace('Z', '+00:00'))
-        
-        return cls(**data)
-
-@dataclass
-class QueryHistory:
-    """Query history model for BigQuery with encrypted ID"""
-    id: str
-    encrypted_id: str
-    user_id: str
-    query: str
-    response: str
-    created_at: datetime
-    conversation_master_id: Optional[str] = None
-    is_sensitive: bool = False
+    def from_dict(cls, data: Dict[str, Any]):
+        """Create from dictionary."""
+        instance = super().from_dict(data)
+        if 'encrypted_id' in data:
+            instance._encrypted_id = data['encrypted_id']
+        return instance
     
     @classmethod
-    def create(cls, user_id: str, query: str, response: str, 
-               conversation_master_id: Optional[str] = None,
-               is_sensitive: bool = False, encrypted_id: str = None) -> 'QueryHistory':
-        """Create a new query history instance"""
-        query_id = str(uuid.uuid4())
+    def create(cls, user_id: str, query: str, response: str,
+               conversation_master_id: Optional[str] = None, is_sensitive: bool = False):
+        """Create a new query history entry."""
         return cls(
-            id=query_id,
-            encrypted_id=encrypted_id or f"enc_{query_id[:8]}",  # Will be properly encrypted in database layer
             user_id=user_id,
             query=query,
             response=response,
-            created_at=datetime.now(timezone.utc),
             conversation_master_id=conversation_master_id,
             is_sensitive=is_sensitive
         )
+
+class AuditLog(BaseModel):
+    """Audit log model."""
+    
+    def __init__(self, action: str, user_id: Optional[str] = None,
+                 details: Optional[str] = None, ip_address: Optional[str] = None,
+                 severity: str = "INFO"):
+        super().__init__()
+        self.user_id = user_id
+        self.action = action
+        self.details = details
+        self.ip_address = ip_address
+        self.severity = severity
+        self._encrypted_id = None
+    
+    @property
+    def encrypted_id(self) -> str:
+        """Get encrypted ID."""
+        if not self._encrypted_id:
+            try:
+                bq_db = get_bq_db()
+                self._encrypted_id = bq_db.id_crypto.encrypt_id(self.id)
+            except Exception as e:
+                logger.error(f"Error encrypting audit log ID: {e}")
+                self._encrypted_id = f"audit_{self.id[:8]}"
+        return self._encrypted_id
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for BigQuery insertion"""
-        data = asdict(self)
-        # Convert datetime to string
-        if isinstance(data['created_at'], datetime):
-            data['created_at'] = data['created_at'].isoformat()
-        return data
+        """Convert to dictionary."""
+        result = super().to_dict()
+        result['encrypted_id'] = self.encrypted_id
+        if '_encrypted_id' in result:
+            del result['_encrypted_id']
+        return result
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'QueryHistory':
-        """Create QueryHistory from BigQuery result dictionary"""
-        # Convert ISO string back to datetime if needed
-        if isinstance(data.get('created_at'), str):
-            data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
-        
-        return cls(**data)
-
-@dataclass
-class AuditLog:
-    """Audit log model for BigQuery with encrypted ID"""
-    id: str
-    encrypted_id: str
-    action: str
-    created_at: datetime
-    severity: str = "INFO"
-    user_id: Optional[str] = None
-    details: Optional[str] = None
-    ip_address: Optional[str] = None
+    def from_dict(cls, data: Dict[str, Any]):
+        """Create from dictionary."""
+        instance = super().from_dict(data)
+        if 'encrypted_id' in data:
+            instance._encrypted_id = data['encrypted_id']
+        return instance
     
     @classmethod
     def create(cls, action: str, user_id: Optional[str] = None,
                details: Optional[str] = None, ip_address: Optional[str] = None,
-               severity: str = "INFO", encrypted_id: str = None) -> 'AuditLog':
-        """Create a new audit log instance"""
-        log_id = str(uuid.uuid4())
+               severity: str = "INFO"):
+        """Create a new audit log entry."""
         return cls(
-            id=log_id,
-            encrypted_id=encrypted_id or f"enc_{log_id[:8]}",  # Will be properly encrypted in database layer
             action=action,
-            created_at=datetime.now(timezone.utc),
-            severity=severity,
             user_id=user_id,
             details=details,
-            ip_address=ip_address
+            ip_address=ip_address,
+            severity=severity
         )
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for BigQuery insertion"""
-        data = asdict(self)
-        # Convert datetime to string
-        if isinstance(data['created_at'], datetime):
-            data['created_at'] = data['created_at'].isoformat()
-        return data
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'AuditLog':
-        """Create AuditLog from BigQuery result dictionary"""
-        # Convert ISO string back to datetime if needed
-        if isinstance(data.get('created_at'), str):
-            data['created_at'] = datetime.fromisoformat(data['created_at'].replace('Z', '+00:00'))
-        
-        return cls(**data)
-
-# Model registry for easy access
-MODEL_REGISTRY = {
-    'roles': Role,
-    'users': User,
-    'conversation_history': ConversationHistory,
-    'query_history': QueryHistory,
-    'audit_logs': AuditLog
-}
-
-def get_model_class(table_name: str):
-    """Get model class for a table name"""
-    return MODEL_REGISTRY.get(table_name)

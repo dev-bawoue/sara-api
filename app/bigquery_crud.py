@@ -1,12 +1,13 @@
 """
 CRUD operations for BigQuery database
-Updated with role-based access control and ID encryption
+Fixed version with proper authentication and ID handling
 """
 
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime, timezone, timedelta
 import re
 import logging
+import hashlib
 
 from app.bigquery_database import get_bq_db
 from app.bigquery_models import User, ConversationHistory, QueryHistory, AuditLog, Role
@@ -39,7 +40,7 @@ def get_role_by_name(role_name: str) -> Optional[Role]:
         bq_db = get_bq_db()
         sql = f"""
         SELECT * FROM {bq_db.get_table_full_name('roles')}
-        WHERE name = @role_name
+        WHERE LOWER(name) = LOWER(@role_name)
         LIMIT 1
         """
         
@@ -83,23 +84,28 @@ def get_admin_role() -> Optional[Role]:
 
 # User CRUD operations
 def get_user_by_email(email: str) -> Optional[User]:
-    """Get user by email."""
+    """Get user by email - handles both plain email and encrypted lookup."""
     try:
         bq_db = get_bq_db()
+        
+        # First try direct email lookup
         sql = f"""
         SELECT u.*, r.name as role_name FROM {bq_db.get_table_full_name('users')} u
         LEFT JOIN {bq_db.get_table_full_name('roles')} r ON u.role_id = r.id
-        WHERE u.email = @email
+        WHERE LOWER(u.email) = LOWER(@email)
         LIMIT 1
         """
         
-        results = bq_db.query(sql, {'email': email})
+        results = bq_db.query(sql, {'email': email.strip().lower()})
         
         if results:
             user_data = results[0]
-            # Add role name to user data
             user_data['role_name'] = user_data.get('role_name')
-            return User.from_dict(user_data)
+            user = User.from_dict(user_data)
+            logger.info(f"Found user by email: {email}")
+            return user
+            
+        logger.warning(f"No user found with email: {email}")
         return None
         
     except Exception as e:
@@ -107,9 +113,21 @@ def get_user_by_email(email: str) -> Optional[User]:
         return None
 
 def get_user_by_id(user_id: str) -> Optional[User]:
-    """Get user by ID."""
+    """Get user by ID - handles both encrypted and plain IDs."""
     try:
         bq_db = get_bq_db()
+        
+        # Try to decrypt the ID first (in case it's encrypted)
+        actual_id = user_id
+        try:
+            decrypted_id = bq_db.id_crypto.decrypt_id(user_id)
+            actual_id = decrypted_id
+            logger.debug(f"Decrypted ID: {user_id} -> {actual_id}")
+        except:
+            # If decryption fails, use original ID
+            logger.debug(f"Using original ID: {user_id}")
+            pass
+        
         sql = f"""
         SELECT u.*, r.name as role_name FROM {bq_db.get_table_full_name('users')} u
         LEFT JOIN {bq_db.get_table_full_name('roles')} r ON u.role_id = r.id
@@ -117,7 +135,7 @@ def get_user_by_id(user_id: str) -> Optional[User]:
         LIMIT 1
         """
         
-        results = bq_db.query(sql, {'user_id': user_id})
+        results = bq_db.query(sql, {'user_id': actual_id})
         
         if results:
             user_data = results[0]
@@ -143,9 +161,10 @@ def create_user(user: schemas.UserCreate) -> User:
         hashed_password = None
         if user.password:
             hashed_password = auth.get_password_hash(user.password)
+            logger.info(f"Hashed password for user {user.email}")
         
         new_user = User.create(
-            email=user.email,
+            email=user.email.strip().lower(),  # Normalize email
             role_id=client_role.id,
             hashed_password=hashed_password,
             auth_provider=user.auth_provider or "email",
@@ -177,7 +196,7 @@ def create_admin_user(user: schemas.UserCreate) -> User:
             hashed_password = auth.get_password_hash(user.password)
         
         new_user = User.create(
-            email=user.email,
+            email=user.email.strip().lower(),  # Normalize email
             role_id=admin_role.id,
             hashed_password=hashed_password,
             auth_provider=user.auth_provider or "email",
@@ -204,7 +223,7 @@ def create_oauth_user(email: str, full_name: str = None, provider: str = "google
             raise Exception("Default client role not found")
         
         new_user = User.create(
-            email=email,
+            email=email.strip().lower(),  # Normalize email
             role_id=client_role.id,
             hashed_password=None,  # OAuth users don't have passwords
             auth_provider=provider,
@@ -220,11 +239,42 @@ def create_oauth_user(email: str, full_name: str = None, provider: str = "google
         logger.error(f"Error creating OAuth user {email}: {e}")
         raise
 
+def verify_user_password(email: str, password: str) -> Optional[User]:
+    """Verify user credentials and return user if valid."""
+    try:
+        # Get user by email
+        user = get_user_by_email(email.strip().lower())
+        if not user:
+            logger.warning(f"User not found: {email}")
+            return None
+        
+        # Check if user is active
+        if not user.is_active:
+            logger.warning(f"Inactive user attempted login: {email}")
+            return None
+        
+        # Check if this is an OAuth user
+        if user.auth_provider != "email" or not user.hashed_password:
+            logger.warning(f"OAuth user attempted password login: {email}")
+            return None
+        
+        # Verify password
+        if auth.verify_password(password, user.hashed_password):
+            logger.info(f"Password verification successful for: {email}")
+            return user
+        else:
+            logger.warning(f"Password verification failed for: {email}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error verifying password for {email}: {e}")
+        return None
+
 def is_user_admin(user: User) -> bool:
     """Check if user has admin role."""
     try:
         role = get_role_by_id(user.role_id)
-        return role and role.name == 'admin'
+        return role and role.name.lower() == 'admin'
     except Exception as e:
         logger.error(f"Error checking if user is admin: {e}")
         return False
@@ -235,14 +285,21 @@ def create_conversation(user_id: str, title: str) -> ConversationHistory:
     try:
         bq_db = get_bq_db()
         
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        try:
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+        except:
+            pass
+        
         conversation = ConversationHistory.create(
-            user_id=user_id,
+            user_id=actual_user_id,
             conversation_title=title
         )
         
         bq_db.insert_row('conversation_history', conversation.to_dict())
         
-        logger.info(f"Created conversation: {title} for user {user_id}")
+        logger.info(f"Created conversation: {title} for user {actual_user_id}")
         return conversation
         
     except Exception as e:
@@ -253,6 +310,13 @@ def get_user_conversations(user_id: str, skip: int = 0, limit: int = 100) -> Lis
     """Get user's conversations with query count."""
     try:
         bq_db = get_bq_db()
+        
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        try:
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+        except:
+            pass
         
         sql = f"""
         SELECT 
@@ -268,7 +332,7 @@ def get_user_conversations(user_id: str, skip: int = 0, limit: int = 100) -> Lis
         """
         
         results = bq_db.query(sql, {
-            'user_id': user_id,
+            'user_id': actual_user_id,
             'skip': skip,
             'limit': limit
         })
@@ -296,13 +360,20 @@ def get_conversation_count(user_id: str) -> int:
     try:
         bq_db = get_bq_db()
         
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        try:
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+        except:
+            pass
+        
         sql = f"""
         SELECT COUNT(*) as count 
         FROM {bq_db.get_table_full_name('conversation_history')}
         WHERE user_id = @user_id AND is_active = true
         """
         
-        results = bq_db.query(sql, {'user_id': user_id})
+        results = bq_db.query(sql, {'user_id': actual_user_id})
         return results[0]['count'] if results else 0
         
     except Exception as e:
@@ -315,10 +386,11 @@ def get_conversation_queries(conversation_id: str, skip: int = 0, limit: int = 1
         bq_db = get_bq_db()
         
         # Try to decrypt the conversation ID first
+        actual_conversation_id = conversation_id
         try:
-            decrypted_id = bq_db.id_crypto.decrypt_id(conversation_id)
+            actual_conversation_id = bq_db.id_crypto.decrypt_id(conversation_id)
         except:
-            decrypted_id = conversation_id  # Fallback to original ID
+            pass
         
         sql = f"""
         SELECT * FROM {bq_db.get_table_full_name('query_history')}
@@ -328,7 +400,7 @@ def get_conversation_queries(conversation_id: str, skip: int = 0, limit: int = 1
         """
         
         results = bq_db.query(sql, {
-            'conversation_id': decrypted_id,
+            'conversation_id': actual_conversation_id,
             'skip': skip,
             'limit': limit
         })
@@ -345,12 +417,13 @@ def update_conversation_title(conversation_id: str, title: str):
         bq_db = get_bq_db()
         
         # Try to decrypt the conversation ID first
+        actual_conversation_id = conversation_id
         try:
-            decrypted_id = bq_db.id_crypto.decrypt_id(conversation_id)
+            actual_conversation_id = bq_db.id_crypto.decrypt_id(conversation_id)
         except:
-            decrypted_id = conversation_id  # Fallback to original ID
+            pass
         
-        bq_db.update_row('conversation_history', decrypted_id, {
+        bq_db.update_row('conversation_history', actual_conversation_id, {
             'conversation_title': title
         })
         
@@ -366,13 +439,14 @@ def delete_conversation(conversation_id: str, user_id: str):
         bq_db = get_bq_db()
         
         # Try to decrypt the conversation ID first
+        actual_conversation_id = conversation_id
         try:
-            decrypted_id = bq_db.id_crypto.decrypt_id(conversation_id)
+            actual_conversation_id = bq_db.id_crypto.decrypt_id(conversation_id)
         except:
-            decrypted_id = conversation_id  # Fallback to original ID
+            pass
         
         # Soft delete conversation
-        bq_db.update_row('conversation_history', decrypted_id, {
+        bq_db.update_row('conversation_history', actual_conversation_id, {
             'is_active': False
         })
         
@@ -388,30 +462,38 @@ def create_query(user_id: str, query: str, response: str, conversation_master_id
     try:
         bq_db = get_bq_db()
         
-        # Try to decrypt the conversation ID if it's encrypted
+        # Decrypt user_id if needed
+        actual_user_id = user_id
         try:
-            decrypted_conversation_id = bq_db.id_crypto.decrypt_id(conversation_master_id)
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
         except:
-            decrypted_conversation_id = conversation_master_id  # Fallback to original ID
+            pass
+        
+        # Try to decrypt the conversation ID if it's encrypted
+        actual_conversation_id = conversation_master_id
+        try:
+            actual_conversation_id = bq_db.id_crypto.decrypt_id(conversation_master_id)
+        except:
+            pass
         
         is_sensitive = SensitiveDataScanner.contains_sensitive_data(f"{query} {response}")
         
         query_history = QueryHistory.create(
-            user_id=user_id,
+            user_id=actual_user_id,
             query=query,
             response=response,
-            conversation_master_id=decrypted_conversation_id,
+            conversation_master_id=actual_conversation_id,
             is_sensitive=is_sensitive
         )
         
         bq_db.insert_row('query_history', query_history.to_dict())
         
         # Update conversation's updated_at timestamp
-        bq_db.update_row('conversation_history', decrypted_conversation_id, {
+        bq_db.update_row('conversation_history', actual_conversation_id, {
             'updated_at': datetime.now(timezone.utc)
         })
         
-        logger.info(f"Created query for user {user_id}")
+        logger.info(f"Created query for user {actual_user_id}")
         return query_history
         
     except Exception as e:
@@ -423,6 +505,13 @@ def get_user_queries(user_id: str, skip: int = 0, limit: int = 100) -> List[Quer
     try:
         bq_db = get_bq_db()
         
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        try:
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+        except:
+            pass
+        
         sql = f"""
         SELECT * FROM {bq_db.get_table_full_name('query_history')}
         WHERE user_id = @user_id
@@ -431,7 +520,7 @@ def get_user_queries(user_id: str, skip: int = 0, limit: int = 100) -> List[Quer
         """
         
         results = bq_db.query(sql, {
-            'user_id': user_id,
+            'user_id': actual_user_id,
             'skip': skip,
             'limit': limit
         })
@@ -447,13 +536,20 @@ def get_query_count(user_id: str) -> int:
     try:
         bq_db = get_bq_db()
         
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        try:
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+        except:
+            pass
+        
         sql = f"""
         SELECT COUNT(*) as count 
         FROM {bq_db.get_table_full_name('query_history')}
         WHERE user_id = @user_id
         """
         
-        results = bq_db.query(sql, {'user_id': user_id})
+        results = bq_db.query(sql, {'user_id': actual_user_id})
         return results[0]['count'] if results else 0
         
     except Exception as e:
@@ -464,6 +560,13 @@ def get_daily_query_count(user_id: str, target_date: date = None) -> int:
     """Get query count for a specific date."""
     try:
         bq_db = get_bq_db()
+        
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        try:
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+        except:
+            pass
         
         if target_date is None:
             target_date = date.today()
@@ -481,7 +584,7 @@ def get_daily_query_count(user_id: str, target_date: date = None) -> int:
         """
         
         results = bq_db.query(sql, {
-            'user_id': user_id,
+            'user_id': actual_user_id,
             'start_date': start_datetime,
             'end_date': end_datetime
         })
@@ -504,9 +607,17 @@ def create_audit_log(
     try:
         bq_db = get_bq_db()
         
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        if user_id:
+            try:
+                actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+            except:
+                pass
+        
         audit_log = AuditLog.create(
             action=action,
-            user_id=user_id,
+            user_id=actual_user_id,
             details=details,
             ip_address=ip_address,
             severity=severity
@@ -545,7 +656,7 @@ def get_audit_logs(skip: int = 0, limit: int = 100) -> List[AuditLog]:
 
 # Admin functions
 def get_all_users(skip: int = 0, limit: int = 50) -> List[Dict]:
-    """Get all users with query counts (admin only)."""
+    """Get all users with query counts (admin only) - returns plain text data."""
     try:
         bq_db = get_bq_db()
         
@@ -571,10 +682,12 @@ def get_all_users(skip: int = 0, limit: int = 50) -> List[Dict]:
         users = []
         for row in results:
             users.append({
-                "id": row['encrypted_id'],  # Return encrypted ID
-                "email": row['email'],
+                "id": row['encrypted_id'],  # Return encrypted ID for API
+                "email": row['email'],  # Plain text email
+                "full_name": row['full_name'],  # Plain text name
                 "is_active": row['is_active'],
                 "created_at": row['created_at'],
+                "auth_provider": row['auth_provider'],
                 "role_name": row['role_name'],
                 "query_count": row['query_count'] or 0
             })
@@ -661,10 +774,11 @@ def toggle_user_status(user_id: str) -> bool:
         bq_db = get_bq_db()
         
         # Try to decrypt the user ID first
+        actual_user_id = user_id
         try:
-            decrypted_id = bq_db.id_crypto.decrypt_id(user_id)
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
         except:
-            decrypted_id = user_id  # Fallback to original ID
+            pass
         
         # First get current status
         sql = f"""
@@ -672,7 +786,7 @@ def toggle_user_status(user_id: str) -> bool:
         WHERE id = @user_id
         """
         
-        results = bq_db.query(sql, {'user_id': decrypted_id})
+        results = bq_db.query(sql, {'user_id': actual_user_id})
         if not results:
             raise Exception("User not found")
         
@@ -680,7 +794,7 @@ def toggle_user_status(user_id: str) -> bool:
         new_status = not current_status
         
         # Update status
-        bq_db.update_row('users', decrypted_id, {'is_active': new_status})
+        bq_db.update_row('users', actual_user_id, {'is_active': new_status})
         
         logger.info(f"Toggled user {user_id} status to: {new_status}")
         return new_status
@@ -695,10 +809,18 @@ def get_conversation_by_id(conversation_id: str, user_id: str) -> Optional[Conve
         bq_db = get_bq_db()
         
         # Try to decrypt the conversation ID first
+        actual_conversation_id = conversation_id
         try:
-            decrypted_id = bq_db.id_crypto.decrypt_id(conversation_id)
+            actual_conversation_id = bq_db.id_crypto.decrypt_id(conversation_id)
         except:
-            decrypted_id = conversation_id  # Fallback to original ID
+            pass
+        
+        # Decrypt user_id if needed
+        actual_user_id = user_id
+        try:
+            actual_user_id = bq_db.id_crypto.decrypt_id(user_id)
+        except:
+            pass
         
         sql = f"""
         SELECT * FROM {bq_db.get_table_full_name('conversation_history')}
@@ -707,11 +829,9 @@ def get_conversation_by_id(conversation_id: str, user_id: str) -> Optional[Conve
         """
         
         results = bq_db.query(sql, {
-            'conversation_id': decrypted_id,
-            'user_id': user_id
+            'conversation_id': actual_conversation_id,
+            'user_id': actual_user_id
         })
-
-        
         
         if results:
             return ConversationHistory.from_dict(results[0])
