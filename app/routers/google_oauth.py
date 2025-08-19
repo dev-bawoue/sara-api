@@ -3,9 +3,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2AuthorizationCodeBearer
 import os
 from typing import Optional
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app import models, crud, auth
+from app import auth
+from app import bigquery_crud as crud
 from app.schemas import Token
 from datetime import timedelta
 import logging
@@ -118,8 +117,7 @@ async def google_callback(
     error: Optional[str] = None,
     scope: Optional[str] = None,
     authuser: Optional[str] = None,
-    prompt: Optional[str] = None,
-    db: Session = Depends(get_db)
+    prompt: Optional[str] = None
 ):
     """Handle Google OAuth callback."""
     try:
@@ -225,12 +223,11 @@ async def google_callback(
             
             # Check if user exists in database
             try:
-                user = crud.get_user_by_email(db, email=user_info["email"])
+                user = crud.get_user_by_email(email=user_info["email"])
                 
                 if not user:
                     logger.info(f"Creating new Google user: {user_info['email']}")
                     user = crud.create_oauth_user(
-                        db=db,
                         email=user_info["email"],
                         full_name=user_info.get("name"),
                         provider="google"
@@ -267,7 +264,6 @@ async def google_callback(
                 # Log successful login
                 try:
                     crud.create_audit_log(
-                        db=db,
                         action="LOGIN_SUCCESS_GOOGLE",
                         details=f"User logged in via Google: {user.email}",
                         user_id=user.id,

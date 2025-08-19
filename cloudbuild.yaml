@@ -10,15 +10,12 @@ steps:
         "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:latest",
         ".",
       ]
-
   # Push the container image to Artifact Registry
   - name: "gcr.io/cloud-builders/docker"
     args:
       ["push", "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:$COMMIT_SHA"]
-
   - name: "gcr.io/cloud-builders/docker"
     args: ["push", "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:latest"]
-
   # Deploy container image to Cloud Run
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: gcloud
@@ -37,20 +34,17 @@ steps:
         "--port",
         "8080",
         "--memory",
-        "1Gi",
+        "2Gi",
         "--cpu",
-        "1",
+        "2",
         "--max-instances",
         "10",
-        "--add-cloudsql-instances",
-        "$PROJECT_ID:us-east1:sara-postgres",
         "--set-env-vars",
-        "ENVIRONMENT=production,PORT=8080,ALGORITHM=HS256,ACCESS_TOKEN_EXPIRE_MINUTES=30,PROJECT_ID=$PROJECT_ID",
+        "ENVIRONMENT=production,PORT=8080,ALGORITHM=HS256,ACCESS_TOKEN_EXPIRE_MINUTES=30,PROJECT_ID=$PROJECT_ID,BIGQUERY_DATASET=sara_dataset,BIGQUERY_LOCATION=US,BACKEND_URL=https://sara-api-update-1024279616298.us-east1.run.app,FRONTEND_URL=https://sara-frontend-1024279616298.us-east1.run.app",
         "--set-secrets",
-        "DATABASE_URL=DATABASE_URL:latest,SECRET_KEY=SECRET_KEY:latest,ADMIN_EMAIL=ADMIN_EMAIL:latest,ADMIN_PASSWORD=ADMIN_PASSWORD:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
+        "SECRET_KEY=SECRET_KEY:latest,ADMIN_EMAIL=ADMIN_EMAIL:latest,ADMIN_PASSWORD=ADMIN_PASSWORD:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,GOOGLE_OAUTH_CLIENT_ID=GOOGLE_OAUTH_CLIENT_ID:latest,GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest",
       ]
-
-  # Run database migrations
+  # Initialize BigQuery dataset and tables
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: gcloud
     args:
@@ -58,16 +52,14 @@ steps:
         "run",
         "jobs",
         "execute",
-        "sara-api-migration",
+        "sara-bigquery-init",
         "--region",
         "us-east1",
         "--wait",
       ]
-
 images:
   - "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:$COMMIT_SHA"
   - "us-east1-docker.pkg.dev/$PROJECT_ID/sara/sara-api:latest"
-
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: "E2_HIGHCPU_8"

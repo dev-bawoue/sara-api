@@ -15,8 +15,26 @@ class UserLogin(BaseModel):
     password: Optional[str] = None
 
 class User(UserBase):
-    id: int
+    id: str  # Now using encrypted ID as string
     is_active: bool
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class UserProfile(UserBase):
+    id: str  # Encrypted ID
+    is_active: bool
+    created_at: datetime
+    role: str  # User's role name (admin/client)
+    
+    class Config:
+        from_attributes = True
+
+class Role(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
     created_at: datetime
     
     class Config:
@@ -33,7 +51,7 @@ class ConversationRequest(BaseModel):
     title: str
 
 class ConversationResponse(BaseModel):
-    id: int
+    id: str  # Now using encrypted ID as string
     conversation_title: str
     created_at: datetime
     updated_at: datetime
@@ -45,13 +63,13 @@ class ConversationResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str
-    conversation_master_id: Optional[int] = None
+    conversation_master_id: Optional[str] = None  # Now accepts encrypted ID
 
 class QueryResponse(BaseModel):
-    id: int
+    id: str  # Encrypted ID
     query: str
     response: str
-    conversation_master_id: int
+    conversation_master_id: str  # Encrypted ID
     created_at: datetime
     is_sensitive: bool
     
@@ -67,8 +85,8 @@ class ConversationHistoryResponse(BaseModel):
     total: int
 
 class AuditLogResponse(BaseModel):
-    id: int
-    user_id: Optional[int]
+    id: str  # Encrypted ID or hash
+    user_id: Optional[str]  # Encrypted ID or hash
     action: str
     details: Optional[str]
     ip_address: Optional[str]
@@ -89,3 +107,19 @@ class GoogleUserInfo(BaseModel):
     name: Optional[str] = None
     given_name: Optional[str] = None
     family_name: Optional[str] = None
+
+class SystemStatsResponse(BaseModel):
+    total_users: int
+    total_queries: int
+    queries_today: int
+    queries_this_week: int
+    sensitive_queries_total: int
+    failed_logins_24h: int
+
+class UserListItem(BaseModel):
+    id: str  # Encrypted ID
+    email: str
+    is_active: bool
+    created_at: datetime
+    role_name: str
+    query_count: int
