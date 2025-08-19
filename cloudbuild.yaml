@@ -32,7 +32,7 @@ steps:
         "managed",
         "--allow-unauthenticated",
         "--port",
-        "8080",
+        "8000",
         "--memory",
         "2Gi",
         "--cpu",
@@ -40,7 +40,7 @@ steps:
         "--max-instances",
         "10",
         "--set-env-vars",
-        "ENVIRONMENT=production,PORT=8080,ALGORITHM=HS256,ACCESS_TOKEN_EXPIRE_MINUTES=30,PROJECT_ID=$PROJECT_ID,BIGQUERY_DATASET=sara_dataset,BIGQUERY_LOCATION=US,BACKEND_URL=https://sara-api-update-1024279616298.us-east1.run.app,FRONTEND_URL=https://sara-frontend-1024279616298.us-east1.run.app",
+        "ENVIRONMENT=production,PORT=8000,ALGORITHM=HS256,ACCESS_TOKEN_EXPIRE_MINUTES=30,PROJECT_ID=$PROJECT_ID,BIGQUERY_DATASET=sara_dataset,BIGQUERY_LOCATION=US,BACKEND_URL=https://sara-api-update-1024279616298.us-east1.run.app,FRONTEND_URL=https://sara-frontend-1024279616298.us-east1.run.app",
         "--set-secrets",
         "SECRET_KEY=SECRET_KEY:latest,ADMIN_EMAIL=ADMIN_EMAIL:latest,ADMIN_PASSWORD=ADMIN_PASSWORD:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,GOOGLE_OAUTH_CLIENT_ID=GOOGLE_OAUTH_CLIENT_ID:latest,GOOGLE_OAUTH_CLIENT_SECRET=GOOGLE_OAUTH_CLIENT_SECRET:latest",
       ]

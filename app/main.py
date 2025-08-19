@@ -130,7 +130,7 @@ async def root():
         "status": "healthy",
         "environment": environment,
         "project_id": project_id,
-        "port": os.getenv("PORT", "8080"),
+        "port": os.getenv("PORT", "8000"),
         "database": "BigQuery",
         "authentication_methods": ["email_password", "google_oauth"],
         "endpoints": {
@@ -162,7 +162,7 @@ async def health_check():
             "database_connection": "connected" if connection_ok else "failed",
             "environment": environment,
             "project_id": project_id,
-            "port": os.getenv("PORT", "8080"),
+            "port": os.getenv("PORT", "8000"),
             "timestamp": str(datetime.now()),
             "version": "2.1.0"
         }
@@ -294,8 +294,8 @@ from datetime import datetime
 if __name__ == "__main__":
     import uvicorn
     
-    # Use PORT environment variable from Cloud Run, default to 8080
-    port = int(os.environ.get("PORT", 8080))
+    # Use PORT environment variable from Cloud Run, default to 8000
+    port = int(os.environ.get("PORT", 8000))
     
     logger.info(f" Starting SARA API on port {port}")
     
