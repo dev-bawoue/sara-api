@@ -63,6 +63,8 @@ class Role(BaseModel):
 
 class User(BaseModel):
     """User model with proper authentication handling."""
+    role: Optional[str] = None
+    
     
     def __init__(self, email: str, role_id: str, hashed_password: Optional[str] = None,
                  auth_provider: str = "email", full_name: Optional[str] = None,
@@ -76,7 +78,7 @@ class User(BaseModel):
         self.full_name = full_name
         self.avatar_url = avatar_url
         self._encrypted_id = None  # Cache for encrypted ID
-    
+        
     @property
     def encrypted_id(self) -> str:
         """Get encrypted ID, generating it if not cached."""
@@ -97,6 +99,8 @@ class User(BaseModel):
         # Remove cached property
         if '_encrypted_id' in result:
             del result['_encrypted_id']
+        if 'role' in result:
+            del result['role']
         return result
     
     @classmethod
@@ -109,6 +113,8 @@ class User(BaseModel):
         for key, value in data.items():
             if key == 'encrypted_id':
                 instance._encrypted_id = value  # Cache the encrypted ID
+            elif key == 'role_name':
+                instance.role = value
             elif key.endswith('_at') and isinstance(value, str):
                 # Parse datetime strings
                 try:
@@ -124,7 +130,7 @@ class User(BaseModel):
         # Ensure email is normalized
         if hasattr(instance, 'email') and instance.email:
             instance.email = instance.email.strip().lower()
-        
+            instance.role = data.get("role_name")
         return instance
     
     @classmethod
